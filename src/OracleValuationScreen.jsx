@@ -1,6 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts';
-import { Activity, ShieldCheck, FileText, Calculator, Network, CheckCircle2, ArrowRight } from 'lucide-react';
+import { Activity, ShieldCheck, FileText, Calculator, Network, CheckCircle2, ArrowRight, Tag, Layers } from 'lucide-react';
+
+// 场景标签配置 (与后端 scene_classifier.py 保持同步)
+const SCENE_LABELS = {
+  medical_sft:  { label: '医疗 SFT', color: 'text-red-400',    bg: 'bg-red-900/20 border-red-500/30',    mult: '1.35×' },
+  legal_doc:    { label: '法律文书', color: 'text-orange-400',  bg: 'bg-orange-900/20 border-orange-500/30', mult: '1.20×' },
+  code_tech:    { label: '代码技术', color: 'text-cyan-400',    bg: 'bg-cyan-900/20 border-cyan-500/30',   mult: '1.10×' },
+  creative:     { label: '创意写作', color: 'text-pink-400',    bg: 'bg-pink-900/20 border-pink-500/30',   mult: '0.90×' },
+  chat_qa:      { label: '问答对话', color: 'text-blue-400',    bg: 'bg-blue-900/20 border-blue-500/30',   mult: '0.80×' },
+  illustration: { label: '原创插画', color: 'text-amber-400',   bg: 'bg-amber-900/20 border-amber-500/30', mult: '1.50×' },
+  photo:        { label: '摄影作品', color: 'text-yellow-400',  bg: 'bg-yellow-900/20 border-yellow-500/30', mult: '1.00×' },
+  screenshot:   { label: '截图素材', color: 'text-slate-400',   bg: 'bg-slate-900/30 border-slate-600/30', mult: '0.25×' },
+  diagram:      { label: '图表图解', color: 'text-violet-400',  bg: 'bg-violet-900/20 border-violet-500/30', mult: '0.55×' },
+  noise:        { label: '噪声/废话', color: 'text-red-500',   bg: 'bg-red-950/30 border-red-700/30',     mult: '0.05×' },
+};
 
 const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, onNext }) => {
   const [isCalculating, setIsCalculating] = useState(true);
@@ -8,197 +22,246 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, onNext }) =
   const [chartData, setChartData] = useState([]);
   const [valuationResult, setValuationResult] = useState(null);
 
-  const metricNamesMap = {
-    image: ["语义对齐度(CLIP)", "频域隐写鲁棒性", "LAION美学评级", "画派风格稀缺度", "LoRA微调增益", "KNN-Shapley贡献度"],
-    text: ["信息熵密度(抗废话)", "语料信噪比(AHP)", "实体拓扑密度(GraphRAG)", "语料库稀缺度(熵权)", "大模型微调增益", "KNN-Shapley贡献度"]
+  const defaultMetricNames = {
+    image: ['CLIP语义对齐度', '频域隐写鲁棒性(DWT)', 'LAION美学评级', '画派风格稀缺度', 'LoRA微调增益', 'KNN-Shapley贡献度'],
+    text:  ['信息熵密度(抗废话)', '场景信噪比', '实体拓扑密度(GraphRAG)', '语料库稀缺度', '大模型微调增益', 'KNN-Shapley贡献度'],
   };
 
+  // ★ 新增: 包含场景分类步骤的执行日志
+  const EXEC_STEPS = [
+    `[Stage 1] 接收 [${assetCategory.toUpperCase()}-ADAPTER] 降维映射特征流...`,
+    '[Stage 2] 调用 SceneClassifier → 识别资产领域与场景子类型...',
+    '[Stage 3] 按场景路径提取专项指标 (废话熔断 / 代码结构 / 美学打分)...',
+    '[Stage 4] 场景自适应权重向量 × TEV 双层乘数 → 跨模态复合评分...',
+    '[Stage 5] AMM 联合曲线 + KNN-Shapley + 实物期权 → 统一定价上链...',
+  ];
+
   useEffect(() => {
-    const initialNames = metricNamesMap[assetCategory] || metricNamesMap.text;
-    setChartData(initialNames.map(name => ({ subject: name, score: 0, fullMark: 100 })));
+    const names = defaultMetricNames[assetCategory] || defaultMetricNames.text;
+    setChartData(names.map(n => ({ subject: n, score: 0, fullMark: 100 })));
 
-    const steps = [
-      `接收前端 [${assetCategory.toUpperCase()}-ADAPTER] 降维特征流...`,
-      '验证 zk-SNARK 盲态交叉证明签名合法性...',
-      '过滤废话与劣质数据，计算综合质量核心分...',
-      '触发 KNN-Shapley 与实物期权定价模型 (Real Options)...',
-      '乘以 Token 当量 (TEV) 杠杆，生成最终统一定价...'
-    ];
+    let cur = 0;
+    const ticker = setInterval(() => {
+      if (cur < EXEC_STEPS.length) { setCalcStep(cur); cur++; }
+    }, 750);
 
-    let current = 0;
-    const interval = setInterval(() => {
-      if (current < steps.length) { setCalcStep(current); current++; }
-    }, 800);
-
-    const fetchRealValuation = async () => {
+    const fetchValuation = async () => {
       try {
-        const response = await fetch('http://127.0.0.1:8000/api/valuate', {
+        const res = await fetch('http://127.0.0.1:8000/api/valuate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             asset_category: assetCategory,
             description: assetData,
-            is_zk_mode: isZkMode
-          })
+            is_zk_mode: isZkMode,
+          }),
         });
-        
-        if (!response.ok) throw new Error("HTTP Error");
-        const realData = await response.json();
-        
+        if (!res.ok) throw new Error('HTTP Error');
+        const data = await res.json();
         setTimeout(() => {
-          clearInterval(interval);
-          setValuationResult(realData);
-          setChartData(realData.metrics);
+          clearInterval(ticker);
+          setValuationResult(data);
+          if (data.metrics) setChartData(data.metrics);
           setIsCalculating(false);
-        }, 4000); 
-
-      } catch (error) {
-        console.warn("API 未连接，切入 Mock 模式");
-        const isImage = assetCategory === 'image';
-        const fallbackMetrics = initialNames.map((name, idx) => ({
-            subject: name,
-            score: isImage ? [92, 95, 96, 96, 89, 85][idx] : [92, 88, 85, 96, 82, 95][idx],
-            fullMark: 100
-        }));
-
+        }, 4200);
+      } catch {
+        // Mock fallback (API 未启动时)
+        const isImg = assetCategory === 'image';
+        const mockScores = isImg ? [92, 95, 96, 96, 89, 85] : [88, 82, 85, 93, 80, 91];
+        const mockMetrics = names.map((n, i) => ({ subject: n, score: mockScores[i], fullMark: 100 }));
         setTimeout(() => {
-          clearInterval(interval);
+          clearInterval(ticker);
           setValuationResult({
-            status: "success",
-            asset_hash: "0xFallbackMockHash8a7b6c5d4e3f2a1b",
-            metrics: fallbackMetrics,
+            status: 'success',
+            asset_hash: '0xMockDCT_A8F3B2C1D4E5...',
+            scene_classification: {
+              scene: isImg ? 'illustration' : 'medical_sft',
+              confidence: 0.87,
+              quality_axis: isImg ? 'structure' : 'snr',
+            },
+            metrics: mockMetrics,
             final_valuation: {
-                composite_quality: 91.5,
-                modality_multiplier: isImage ? "50.0x" : "1.0x",
-                base_value: isImage ? 9150 : 183,
-                creator_ratio: 85.0
-            }
+              composite_quality: 88.5,
+              modality_tev: isImg ? '50x' : '1x',
+              scene_multiplier: isImg ? '1.5x' : '1.35x',
+              effective_weight: isImg ? '75x' : '1.35x',
+              base_value: isImg ? 13275 : 239,
+              dynamic_price: isImg ? 16279 : 298,
+              option_premium: isImg ? 4012 : 68,
+              sigma: 0.64,
+              market_demand: isImg ? 22 : 28,
+              creator_ratio: 87.5,
+            },
           });
-          setChartData(fallbackMetrics);
+          setChartData(mockMetrics);
           setIsCalculating(false);
-        }, 4000);
+        }, 4200);
       }
     };
 
-    fetchRealValuation();
-    return () => clearInterval(interval);
-  }, [assetData, assetCategory, isZkMode]);
+    fetchValuation();
+    return () => clearInterval(ticker);
+  }, []);
+
+  const sc = valuationResult?.scene_classification;
+  const sceneConfig = sc ? (SCENE_LABELS[sc.scene] || SCENE_LABELS['chat_qa']) : null;
+  const fv = valuationResult?.final_valuation;
 
   return (
-    <div className="min-h-screen relative flex items-center justify-center bg-slate-950 overflow-hidden p-6 font-sans">
-      <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-teal-900/20 rounded-full blur-[150px] pointer-events-none"></div>
+    <div className="min-h-screen relative flex items-center justify-center bg-slate-950 p-6 font-sans">
+      <div className="absolute top-0 left-0 w-[600px] h-[600px] bg-purple-900/10 rounded-full blur-[200px] pointer-events-none" />
+      <div className="relative max-w-6xl w-full bg-slate-900/80 backdrop-blur-2xl border border-slate-700/50 rounded-3xl p-8 shadow-2xl flex flex-col" style={{ minHeight: '88vh' }}>
 
-      <div className="relative max-w-6xl w-full bg-slate-900/60 backdrop-blur-2xl border border-slate-700/50 rounded-3xl p-8 shadow-2xl flex flex-col h-[85vh]">
-        
-        <div className="flex items-center justify-between mb-8 pb-4 border-b border-slate-700/50">
-          <div className="flex flex-col">
-            <div className="flex items-center space-x-4 mb-2">
-              <Network className="w-8 h-8 text-purple-400" />
-              <h1 className="text-2xl font-extrabold tracking-wide text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-300">
-                多模态基建统一定价预言机 (Oracle)
+        {/* Header */}
+        <div className="flex items-center justify-between mb-6 pb-4 border-b border-slate-700/50">
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center space-x-3">
+              <Network className="w-7 h-7 text-purple-400" />
+              <h1 className="text-xl font-extrabold tracking-wide text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-300">
+                多模态统一定价预言机 v2
               </h1>
             </div>
-            <div className="flex items-center space-x-2 text-[11px] uppercase font-mono tracking-wider">
-              <span className="bg-slate-800 text-slate-400 px-3 py-1 rounded shadow-inner">
-                {assetCategory === 'image' ? 'Visual Art (画作)' : 'Text Corpus (文本)'}
+
+            {/* Pipeline breadcrumb ★ 新增 Scene 节点 */}
+            <div className="flex items-center flex-wrap gap-1 text-[10px] font-mono tracking-wider">
+              <span className={`px-2.5 py-1 rounded border ${assetCategory === 'image' ? 'bg-amber-900/20 text-amber-400 border-amber-500/30' : 'bg-blue-900/20 text-blue-400 border-blue-500/30'}`}>
+                {assetCategory === 'image' ? 'Image-Adapter' : 'Text-Adapter'}
               </span>
               <ArrowRight className="w-3 h-3 text-slate-600" />
-              <span className={`px-3 py-1 rounded border shadow-lg ${assetCategory === 'image' ? 'bg-amber-900/30 text-amber-400 border-amber-500/30' : 'bg-blue-900/30 text-blue-400 border-blue-500/30'}`}>
-                {assetCategory === 'image' ? 'Image-Adapter (LAION & DWT)' : 'Text-Adapter (GraphRAG)'}
-              </span>
+              {sc ? (
+                <span className={`px-2.5 py-1 rounded border flex items-center gap-1 ${sceneConfig.bg} ${sceneConfig.color}`}>
+                  <Tag className="w-3 h-3" /> {sceneConfig.label}
+                  <span className="opacity-60 ml-1">{Math.round(sc.confidence * 100)}%</span>
+                </span>
+              ) : (
+                <span className="px-2.5 py-1 rounded border bg-purple-900/20 text-purple-400 border-purple-500/30 animate-pulse">
+                  Scene Classifying...
+                </span>
+              )}
               <ArrowRight className="w-3 h-3 text-slate-600" />
-              <span className="bg-emerald-900/30 text-emerald-400 px-3 py-1 rounded border border-emerald-500/30">
-                Unified Pricing Framework (统一定价)
+              <span className="px-2.5 py-1 rounded border bg-emerald-900/20 text-emerald-400 border-emerald-500/30">
+                Unified TEV Pricing
               </span>
             </div>
           </div>
+
           <div className={`px-4 py-2 rounded-full border text-sm font-bold flex items-center ${isCalculating ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'}`}>
             {isCalculating ? <Activity className="w-4 h-4 mr-2 animate-spin" /> : <CheckCircle2 className="w-4 h-4 mr-2" />}
-            {isCalculating ? 'Consensus Computing...' : 'Valuation Complete'}
+            {isCalculating ? 'Computing...' : 'Valuation Complete'}
           </div>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-10 flex-1 overflow-hidden">
-          
-          <div className="bg-slate-950/50 rounded-2xl border border-slate-800 p-6 flex flex-col relative">
-            <h3 className="text-sm font-bold uppercase tracking-widest mb-4 flex items-center text-purple-400">
-              <Activity className="w-4 h-4 mr-2" /> 降维映射后标准化特征矩阵
+        {/* Main grid */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 flex-1">
+
+          {/* Left: Radar chart */}
+          <div className="bg-slate-950/50 rounded-2xl border border-slate-800 p-6 flex flex-col">
+            <h3 className="text-xs font-bold uppercase tracking-widest mb-4 flex items-center text-purple-400">
+              <Activity className="w-4 h-4 mr-2" /> 场景自适应 6D 特征矩阵
             </h3>
-            <div className="flex-1 w-full relative">
+            <div className="flex-1 w-full" style={{ minHeight: 260 }}>
               <ResponsiveContainer width="100%" height="100%">
-                <RadarChart cx="50%" cy="50%" outerRadius="70%" data={chartData}>
+                <RadarChart cx="50%" cy="50%" outerRadius="68%" data={chartData}>
                   <PolarGrid stroke="#1e293b" />
-                  <PolarAngleAxis dataKey="subject" tick={{ fill: '#94a3b8', fontSize: 11, fontWeight: 600 }} />
+                  <PolarAngleAxis dataKey="subject" tick={{ fill: '#94a3b8', fontSize: 10, fontWeight: 600 }} />
                   <PolarRadiusAxis angle={30} domain={[0, 100]} tick={false} axisLine={false} />
                   <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#8b5cf6', borderRadius: '8px' }} itemStyle={{ color: '#a78bfa' }} />
-                  <Radar dataKey="score" stroke="#8b5cf6" strokeWidth={2} fill="#7c3aed" fillOpacity={isCalculating ? 0.1 : 0.4} />
+                  <Radar dataKey="score" stroke="#8b5cf6" strokeWidth={2} fill="#7c3aed" fillOpacity={isCalculating ? 0.08 : 0.38} />
                 </RadarChart>
               </ResponsiveContainer>
-              {isCalculating && <div className="absolute inset-0 bg-gradient-to-b from-transparent via-purple-500/10 to-transparent bg-[length:100%_200%] animate-[scan_2s_linear_infinite] pointer-events-none rounded-xl"></div>}
             </div>
+
+            {/* Scene quality axis hint */}
+            {sc && (
+              <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
+                <Layers className="w-3.5 h-3.5 text-purple-500" />
+                <span>主要质量维度: <span className="text-purple-400 font-mono">{sc.quality_axis}</span></span>
+              </div>
+            )}
           </div>
 
-          <div className="flex flex-col space-y-6">
-            
-            <div className="bg-[#0a0f18] rounded-2xl border border-slate-800 p-6 h-48 overflow-hidden relative">
-              <h3 className="text-xs font-bold text-slate-600 uppercase tracking-widest mb-4 border-b border-slate-800/80 pb-2">
-                Unified Oracle Execution Log
+          {/* Right: Log + Pricing */}
+          <div className="flex flex-col gap-5">
+
+            {/* Execution log */}
+            <div className="bg-[#0a0f18] rounded-2xl border border-slate-800 p-5" style={{ minHeight: 160 }}>
+              <h3 className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-3 border-b border-slate-800/80 pb-2">
+                Oracle Execution Log v2
               </h3>
-              <div className="space-y-3">
-                {[
-                  `接收 [${assetCategory.toUpperCase()}-ADAPTER] 降维映射特征流...`,
-                  '验证 zk-SNARK 盲态交叉证明签名合法性...',
-                  '过滤废话与劣质数据，计算综合质量核心分...',
-                  '触发 KNN-Shapley 与实物期权定价模型 (Real Options)...',
-                  '乘以 Token 当量 (TEV) 杠杆，生成最终统一定价...'
-                ].map((step, index) => (
-                  <div key={index} className={`font-mono text-sm transition-all duration-300 ${index === calcStep ? 'text-purple-400 animate-pulse font-bold' : index < calcStep ? 'text-slate-500' : 'opacity-0'}`}>
-                    {index < calcStep ? '[DONE] ' : '>> '} {step}
+              <div className="space-y-2">
+                {EXEC_STEPS.map((step, i) => (
+                  <div key={i} className={`font-mono text-xs transition-all duration-300 ${i === calcStep ? 'text-purple-400 animate-pulse font-bold' : i < calcStep ? 'text-slate-500' : 'opacity-0'}`}>
+                    {i < calcStep ? '[DONE] ' : '>> '}{step}
                   </div>
                 ))}
               </div>
             </div>
 
-            <div className={`flex-1 bg-gradient-to-br from-slate-900 border rounded-2xl p-6 relative overflow-hidden transition-all duration-700 transform ${isCalculating ? 'translate-y-10 opacity-0 blur-sm' : 'translate-y-0 opacity-100 blur-none'} to-purple-950/20 border-purple-500/30`}>
-              <ShieldCheck className="absolute -bottom-6 -right-6 w-48 h-48 rotate-12 text-purple-900/20" />
-              
-              <div className="flex justify-between items-start mb-4 border-b border-purple-500/20 pb-4">
+            {/* Pricing result card */}
+            <div className={`flex-1 bg-gradient-to-br from-slate-900 to-purple-950/20 border border-purple-500/30 rounded-2xl p-6 relative overflow-hidden transition-all duration-700 ${isCalculating ? 'opacity-0 translate-y-4 blur-sm' : 'opacity-100 translate-y-0 blur-none'}`}>
+              <ShieldCheck className="absolute -bottom-4 -right-4 w-40 h-40 rotate-12 text-purple-900/20 pointer-events-none" />
+
+              <div className="flex justify-between items-start mb-4 pb-3 border-b border-purple-500/20">
                 <div>
-                  <h2 className="text-lg font-bold text-white flex items-center">
-                    <FileText className="w-5 h-5 mr-2 text-purple-400" /> 多模态统一定价与分账凭证
+                  <h2 className="text-base font-bold text-white flex items-center">
+                    <FileText className="w-4 h-4 mr-2 text-purple-400" /> 多模态统一定价凭证
                   </h2>
-                  <p className="text-xs text-slate-500 font-mono mt-1">Hash: {valuationResult?.asset_hash}</p>
+                  <p className="text-[10px] text-slate-500 font-mono mt-1 truncate">{valuationResult?.asset_hash}</p>
                 </div>
               </div>
 
-              {/* 【绝杀升级：展示质量分、杠杆和最终价格】 */}
-              {valuationResult?.status === "rejected" ? (
-                 <div className="p-4 bg-red-900/20 border border-red-500/30 rounded-xl mb-6 relative z-10 text-red-400 font-bold text-center">
-                    ⚠️ 熔断拦截：检测到极低质量数据（废话/随手拍），拒绝估值上链！
-                 </div>
-              ) : (
-                <div className="grid grid-cols-3 gap-3 mb-6 relative z-10">
-                  <div className="bg-slate-950/50 p-3 rounded-xl border border-slate-800">
-                    <p className="text-[10px] text-slate-500 uppercase mb-1">六维综合质量分</p>
-                    <p className="text-xl font-mono text-white">{valuationResult?.final_valuation.composite_quality} <span className="text-[10px] text-slate-500">/100</span></p>
-                  </div>
-                  <div className="bg-slate-950/50 p-3 rounded-xl border border-slate-800">
-                    <p className="text-[10px] text-slate-500 uppercase mb-1 flex items-center">Token 模态杠杆 <span className="ml-1 bg-amber-500/20 text-amber-400 px-1 rounded text-[8px]">TEV</span></p>
-                    <p className={`text-xl font-bold ${assetCategory === 'image' ? 'text-amber-400' : 'text-blue-400'}`}>{valuationResult?.final_valuation.modality_multiplier}</p>
-                  </div>
-                  <div className="bg-purple-900/20 p-3 rounded-xl border border-purple-500/30">
-                    <p className="text-[10px] text-purple-400 uppercase mb-1">动态统一定价 (Base)</p>
-                    <p className="text-xl font-mono text-white">{valuationResult?.final_valuation.base_value.toLocaleString()} <span className="text-[10px] text-purple-400">CRD</span></p>
-                  </div>
+              {valuationResult?.status === 'rejected' ? (
+                <div className="p-4 bg-red-900/20 border border-red-500/30 rounded-xl mb-4 text-red-400 font-bold text-center text-sm">
+                  ⚠️ 熔断拦截: {valuationResult?.reason || '检测到极低质量/噪声数据，拒绝估值上链'}
                 </div>
+              ) : (
+                <>
+                  {/* ★ 双层乘数展示: 4个指标格 */}
+                  <div className="grid grid-cols-2 gap-2.5 mb-4 relative z-10">
+                    <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800">
+                      <p className="text-[9px] text-slate-500 uppercase mb-1">六维综合质量</p>
+                      <p className="text-lg font-mono text-white">{fv?.composite_quality}<span className="text-[10px] text-slate-500 ml-1">/100</span></p>
+                    </div>
+                    <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800">
+                      <p className="text-[9px] text-slate-500 uppercase mb-1">模态 TEV</p>
+                      <p className={`text-lg font-bold ${assetCategory === 'image' ? 'text-amber-400' : 'text-blue-400'}`}>{fv?.modality_tev}</p>
+                    </div>
+                    <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800">
+                      <p className="text-[9px] text-slate-500 uppercase mb-1 flex items-center gap-1">
+                        场景子权重 <Tag className="w-3 h-3" />
+                      </p>
+                      <p className={`text-lg font-bold ${sceneConfig?.color || 'text-purple-400'}`}>{fv?.scene_multiplier}</p>
+                    </div>
+                    <div className="bg-purple-900/20 p-3 rounded-xl border border-purple-500/30">
+                      <p className="text-[9px] text-purple-400 uppercase mb-1">有效综合权重</p>
+                      <p className="text-lg font-bold text-emerald-400">{fv?.effective_weight}</p>
+                    </div>
+                  </div>
+
+                  {/* 最终定价行 */}
+                  <div className="grid grid-cols-3 gap-2 mb-4 relative z-10">
+                    <div className="bg-purple-900/20 p-3 rounded-xl border border-purple-500/30">
+                      <p className="text-[9px] text-purple-400 uppercase mb-1">动态定价</p>
+                      <p className="text-base font-mono text-white">{fv?.dynamic_price?.toLocaleString()}<span className="text-[9px] text-purple-400 ml-1">CRD</span></p>
+                    </div>
+                    <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800">
+                      <p className="text-[9px] text-slate-500 uppercase mb-1">期权溢价</p>
+                      <p className="text-base font-mono text-emerald-400">+{fv?.option_premium?.toLocaleString()}</p>
+                    </div>
+                    <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800">
+                      <p className="text-[9px] text-slate-500 uppercase mb-1">创作者分成</p>
+                      <p className="text-base font-bold text-amber-400">{fv?.creator_ratio}%</p>
+                    </div>
+                  </div>
+                </>
               )}
 
-              <button 
+              <button
                 onClick={onNext}
-                disabled={valuationResult?.status === "rejected"}
-                className={`w-full py-4 border rounded-xl font-bold transition-all flex items-center justify-center relative z-10 ${valuationResult?.status === "rejected" ? 'bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed' : 'bg-purple-500/10 hover:bg-purple-500/20 border-purple-500/50 text-purple-300 shadow-[0_0_15px_rgba(139,92,246,0.1)] hover:shadow-[0_0_25px_rgba(139,92,246,0.3)]'}`}
+                disabled={valuationResult?.status === 'rejected'}
+                className={`w-full py-3.5 border rounded-xl font-bold transition-all flex items-center justify-center relative z-10 text-sm ${valuationResult?.status === 'rejected' ? 'bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed' : 'bg-purple-500/10 hover:bg-purple-500/20 border-purple-500/50 text-purple-300 shadow-[0_0_15px_rgba(139,92,246,0.1)] hover:shadow-[0_0_25px_rgba(139,92,246,0.25)]'}`}
               >
-                下发至智能合约领域交易大盘 (AMM) <ArrowRight className="w-4 h-4 ml-2" />
+                下发至智能合约 AMM 交易大盘 <ArrowRight className="w-4 h-4 ml-2" />
               </button>
             </div>
 
