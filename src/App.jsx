@@ -4,28 +4,33 @@ import OracleValuationScreen from './OracleValuationScreen';
 import SmartSplitScreen from './SmartSplitScreen';
 
 function App() {
-  const [currentStep, setCurrentStep]     = useState(1);
-  const [assetData, setAssetData]         = useState('');
-  const [assetCategory, setAssetCategory] = useState('text');
-  const [isZkMode, setIsZkMode]           = useState(true);
-  const [sceneOverride, setSceneOverride] = useState(null); // ★ v3: 场景覆盖调试参数
+  const [currentStep, setCurrentStep]         = useState(1);
+  const [assetData, setAssetData]             = useState('');
+  const [assetCategory, setAssetCategory]     = useState('text');
+  const [isZkMode, setIsZkMode]               = useState(true);
+  const [sceneOverride, setSceneOverride]     = useState(null);
+  const [audioData, setAudioData]             = useState(null);   // ★ v4: audio base64
+  const [valuationResult, setValuationResult] = useState(null);   // ★ v4: oracle 真实结果透传
 
   const handleRestart = () => {
     setCurrentStep(1);
     setAssetData('');
     setAssetCategory('text');
-    setSceneOverride(null); // 重置时清除覆盖
+    setSceneOverride(null);
+    setAudioData(null);
+    setValuationResult(null);
   };
 
   return (
     <div className="font-sans antialiased text-slate-200 selection:bg-teal-500/30">
       {currentStep === 1 && (
         <DataInputScreen
-          onComplete={(data, category, zkEnabled, override) => {
+          onComplete={(data, category, zkEnabled, override, audioB64) => {
             setAssetData(data);
             setAssetCategory(category);
             setIsZkMode(zkEnabled);
-            setSceneOverride(override ?? null); // ★ 接收第 4 参数
+            setSceneOverride(override ?? null);
+            setAudioData(audioB64 ?? null);   // ★ v4: 接收第 5 参数
             setCurrentStep(2);
           }}
         />
@@ -36,13 +41,21 @@ function App() {
           assetData={assetData}
           assetCategory={assetCategory}
           isZkMode={isZkMode}
-          sceneOverride={sceneOverride} // ★ 透传给预言机
-          onNext={() => setCurrentStep(3)}
+          sceneOverride={sceneOverride}
+          audioData={audioData}              // ★ v4: 传入音频数据
+          onNext={(result) => {             // ★ v4: 接收 oracle 完整结果
+            setValuationResult(result);
+            setCurrentStep(3);
+          }}
         />
       )}
 
       {currentStep === 3 && (
-        <SmartSplitScreen onRestart={handleRestart} />
+        <SmartSplitScreen
+          valuationResult={valuationResult}  // ★ v4: 传入真实定价结果
+          assetCategory={assetCategory}
+          onRestart={handleRestart}
+        />
       )}
     </div>
   );

@@ -1,49 +1,115 @@
 import React, { useState, useEffect } from 'react';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts';
-import { Activity, ShieldCheck, FileText, Network, CheckCircle2, ArrowRight, Tag, Layers, FlaskConical } from 'lucide-react';
+import { Activity, ShieldCheck, FileText, Network, CheckCircle2, ArrowRight, Tag, Layers, FlaskConical, Mic } from 'lucide-react';
 
-// 场景标签配置 (与后端 scene_classifier.py 保持同步)
+// 场景标签配置（与后端 scene_classifier.py + audio_adapter.py 完整同步）
 const SCENE_LABELS = {
-  medical_sft:  { label: '医疗 SFT',  color: 'text-red-400',    bg: 'bg-red-900/20 border-red-500/30',       mult: '1.35×' },
-  legal_doc:    { label: '法律文书',  color: 'text-orange-400', bg: 'bg-orange-900/20 border-orange-500/30', mult: '1.20×' },
-  code_tech:    { label: '代码技术',  color: 'text-cyan-400',   bg: 'bg-cyan-900/20 border-cyan-500/30',     mult: '1.10×' },
-  creative:     { label: '创意写作',  color: 'text-pink-400',   bg: 'bg-pink-900/20 border-pink-500/30',     mult: '0.90×' },
-  chat_qa:      { label: '问答对话',  color: 'text-blue-400',   bg: 'bg-blue-900/20 border-blue-500/30',     mult: '0.80×' },
-  illustration: { label: '原创插画',  color: 'text-amber-400',  bg: 'bg-amber-900/20 border-amber-500/30',   mult: '1.50×' },
-  photo:        { label: '摄影作品',  color: 'text-yellow-400', bg: 'bg-yellow-900/20 border-yellow-500/30', mult: '1.00×' },
-  screenshot:   { label: '截图素材',  color: 'text-slate-400',  bg: 'bg-slate-900/30 border-slate-600/30',   mult: '0.25×' },
-  diagram:      { label: '图表图解',  color: 'text-violet-400', bg: 'bg-violet-900/20 border-violet-500/30', mult: '0.55×' },
-  noise:        { label: '噪声/废话', color: 'text-red-500',    bg: 'bg-red-950/30 border-red-700/30',       mult: '0.05×' },
+  medical_sft:  { label: '医疗 SFT',   color: 'text-red-400',     bg: 'bg-red-900/20 border-red-500/30',       mult: '1.35×' },
+  legal_doc:    { label: '法律文书',   color: 'text-orange-400',  bg: 'bg-orange-900/20 border-orange-500/30', mult: '1.20×' },
+  code_tech:    { label: '代码技术',   color: 'text-cyan-400',    bg: 'bg-cyan-900/20 border-cyan-500/30',     mult: '1.10×' },
+  creative:     { label: '创意写作',   color: 'text-pink-400',    bg: 'bg-pink-900/20 border-pink-500/30',     mult: '0.90×' },
+  chat_qa:      { label: '问答对话',   color: 'text-blue-400',    bg: 'bg-blue-900/20 border-blue-500/30',     mult: '0.80×' },
+  illustration: { label: '原创插画',   color: 'text-amber-400',   bg: 'bg-amber-900/20 border-amber-500/30',   mult: '1.50×' },
+  photo:        { label: '摄影作品',   color: 'text-yellow-400',  bg: 'bg-yellow-900/20 border-yellow-500/30', mult: '1.00×' },
+  screenshot:   { label: '截图素材',   color: 'text-slate-400',   bg: 'bg-slate-900/30 border-slate-600/30',   mult: '0.25×' },
+  diagram:      { label: '图表图解',   color: 'text-violet-400',  bg: 'bg-violet-900/20 border-violet-500/30', mult: '0.55×' },
+  noise:        { label: '噪声/废话',  color: 'text-red-500',     bg: 'bg-red-950/30 border-red-700/30',       mult: '0.05×' },
+  general:      { label: '通用音频',   color: 'text-slate-400',   bg: 'bg-slate-900/30 border-slate-600/30',   mult: '1.00×' },
 };
 
-// ★ v3: 接收 sceneOverride prop
-const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverride, onNext }) => {
-  const [isCalculating, setIsCalculating] = useState(true);
-  const [calcStep, setCalcStep]           = useState(0);
-  const [chartData, setChartData]         = useState([]);
-  const [valuationResult, setValuationResult] = useState(null);
-  // ★ v3: 记录后端实际使用的分类方法 (rule / ml / hybrid)
-  const [classifyMethod, setClassifyMethod] = useState(null);
+// 音频细粒度场景标签（audio_scene 字段，仅音频模态）
+const AUDIO_SCENE_LABELS = {
+  speech_medical: { label: '🏥 医疗语音', color: 'text-red-300' },
+  speech_legal:   { label: '⚖️ 法律音频',  color: 'text-orange-300' },
+  speech_edu:     { label: '📚 教育语音',  color: 'text-cyan-300' },
+  music_original: { label: '🎵 原创音乐',  color: 'text-pink-300' },
+  ambient_sfx:    { label: '🌿 环境音效',  color: 'text-slate-300' },
+  noise:          { label: '🚫 噪声',      color: 'text-red-400' },
+};
 
-  const defaultMetricNames = {
-    image: ['CLIP语义对齐度', '频域隐写鲁棒性(DWT)', 'LAION美学评级', '画派风格稀缺度', 'LoRA微调增益', 'KNN-Shapley贡献度'],
+// 分类方法徽章
+const METHOD_BADGE = {
+  rule:     { label: 'rule',     cls: 'text-slate-400 border-slate-600/40 bg-slate-900/40' },
+  ml:       { label: 'ML',       cls: 'text-cyan-400   border-cyan-500/40  bg-cyan-900/20'  },
+  hybrid:   { label: 'hybrid',   cls: 'text-purple-400 border-purple-500/40 bg-purple-900/20' },
+  override: { label: 'override', cls: 'text-amber-400  border-amber-500/40 bg-amber-900/20' },
+};
+
+// 模态 adapter 标签
+const ADAPTER_LABEL = {
+  text:  { label: 'Text-Adapter',  cls: 'bg-blue-900/20 text-blue-400 border-blue-500/30'    },
+  image: { label: 'Image-Adapter', cls: 'bg-amber-900/20 text-amber-400 border-amber-500/30' },
+  audio: { label: 'Audio-Adapter', cls: 'bg-emerald-900/20 text-emerald-400 border-emerald-500/30' },
+};
+
+// Mock 数据（API 未启动时）
+const buildMock = (assetCategory, sceneOverride) => {
+  const isImg   = assetCategory === 'image';
+  const isAudio = assetCategory === 'audio';
+  const mockScene = sceneOverride || (isImg ? 'illustration' : isAudio ? 'medical_sft' : 'medical_sft');
+  const tev = isImg ? '50x' : isAudio ? '120x' : '1x';
+  const scMult = isImg ? '1.5x' : '1.35x';
+  const effW = isImg ? '75x' : isAudio ? '162x' : '1.35x';
+  const baseVal = isImg ? 13275 : isAudio ? 22400 : 239;
+  const dynPrice = isImg ? 16279 : isAudio ? 27430 : 298;
+  const optPremium = isImg ? 4012 : isAudio ? 7250 : 68;
+  const metricNames = {
     text:  ['信息熵密度(抗废话)', '场景信噪比', '实体拓扑密度(GraphRAG)', '语料库稀缺度', '大模型微调增益', 'KNN-Shapley贡献度'],
+    image: ['CLIP语义对齐度', '频域隐写鲁棒性(DWT)', 'LAION美学评级', '画派风格稀缺度', 'LoRA微调增益', 'KNN-Shapley贡献度'],
+    audio: ['频谱熵(信息密度)', 'PESQ感知信噪比', '语音指令连贯性', '音频库稀缺度', 'ASR微调增益', 'KNN-Shapley贡献度'],
+  }[assetCategory] || [];
+  const scores = isImg ? [92, 95, 96, 96, 89, 85] : isAudio ? [87, 90, 84, 95, 88, 91] : [88, 82, 85, 93, 80, 91];
+  return {
+    status: 'success',
+    asset_hash: isAudio ? '0xAFP_mock_acoustic_7F2A...' : isImg ? '0xAFP_mock_perceptual_A8F3...' : '0xTXT_mock_simhash_C9D2...',
+    scene_classification: {
+      scene: mockScene, confidence: sceneOverride ? 1.0 : 0.87,
+      quality_axis: isAudio ? 'snr' : isImg ? 'structure' : 'snr',
+      method: sceneOverride ? 'override' : 'rule',
+      audio_scene: isAudio ? 'speech_medical' : null,
+    },
+    metrics: metricNames.map((n, i) => ({ subject: n, score: scores[i], fullMark: 100 })),
+    final_valuation: {
+      composite_quality: 88.5, modality_tev: tev,
+      scene_multiplier: scMult, effective_weight: effW,
+      base_value: baseVal, dynamic_price: dynPrice,
+      option_premium: optPremium, sigma: 0.64,
+      market_demand: isAudio ? 26 : isImg ? 22 : 28,
+      amm_alpha:     isAudio ? 32 : isImg ? 20 : 32,   // ★ v4: mock 也带 amm_alpha
+      creator_ratio: 87.5,
+    },
+    meta: {
+      modality: assetCategory,
+      modality_label: isAudio ? '音频语音' : isImg ? '图像画作' : '文本语料',
+      adapter_version: isAudio ? 'v1' : 'v2',
+    },
   };
+};
 
-  // ★ v3: Stage 2 日志反映是否为覆盖模式
+// ★ v4: 接收 audioData prop，onNext 回传完整 valuationResult
+const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverride, audioData, onNext }) => {
+  const [isCalculating, setIsCalculating]     = useState(true);
+  const [calcStep, setCalcStep]               = useState(0);
+  const [chartData, setChartData]             = useState([]);
+  const [valuationResult, setValuationResult] = useState(null);
+
   const EXEC_STEPS = [
-    `[Stage 1] 接收 [${assetCategory.toUpperCase()}-ADAPTER] 降维映射特征流...`,
+    `[Stage 1] 模态路由 → [${(ADAPTER_LABEL[assetCategory]?.label || 'Adapter').toUpperCase()}] 初始化，向量知识库接入...`,
     sceneOverride
-      ? `[Stage 2] 场景覆盖已激活 → 跳过 SceneClassifier，强制使用场景: ${sceneOverride}`
-      : '[Stage 2] 调用 SceneClassifier v3 → hybrid 规则+ML 引擎识别场景子类型...',
-    '[Stage 3] 按场景路径提取专项指标 (废话熔断 / 代码结构 / 美学打分)...',
-    '[Stage 4] 场景自适应权重向量 × TEV 双层乘数 → 跨模态复合评分...',
+      ? `[Stage 2] 场景覆盖已激活 → 跳过 SceneClassifier，强制场景: ${sceneOverride}`
+      : `[Stage 2] SceneClassifier v3 hybrid 引擎 → 识别 ${assetCategory === 'audio' ? '音频场景 (ZCR+频谱质心+关键词)' : '文本/图像场景子类型'}...`,
+    `[Stage 3] 场景自适应特征提取 → ${assetCategory === 'audio' ? 'MFCC嵌入 + PESQ代理SNR + 频谱熵' : assetCategory === 'image' ? 'pHash + LAION美学 + DWT' : 'Shannon熵 + GraphRAG + SimHash'}...`,
+    `[Stage 4] TEV 双层乘数 → 模态基础倍率 × 场景权重 → 复合评分...`,
     '[Stage 5] AMM 联合曲线 + KNN-Shapley + 实物期权 → 统一定价上链...',
   ];
 
   useEffect(() => {
-    const names = defaultMetricNames[assetCategory] || defaultMetricNames.text;
-    setChartData(names.map(n => ({ subject: n, score: 0, fullMark: 100 })));
+    const defaultNames = {
+      text:  ['信息熵密度(抗废话)', '场景信噪比', '实体拓扑密度(GraphRAG)', '语料库稀缺度', '大模型微调增益', 'KNN-Shapley贡献度'],
+      image: ['CLIP语义对齐度', '频域隐写鲁棒性(DWT)', 'LAION美学评级', '画派风格稀缺度', 'LoRA微调增益', 'KNN-Shapley贡献度'],
+      audio: ['频谱熵(信息密度)', 'PESQ感知信噪比', '语音指令连贯性', '音频库稀缺度', 'ASR微调增益', 'KNN-Shapley贡献度'],
+    }[assetCategory] || [];
+    setChartData(defaultNames.map(n => ({ subject: n, score: 0, fullMark: 100 })));
 
     let cur = 0;
     const ticker = setInterval(() => {
@@ -52,20 +118,20 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
 
     const fetchValuation = async () => {
       try {
+        const body = {
+          asset_category: assetCategory,
+          description:    assetData,
+          is_zk_mode:     isZkMode,
+          scene_override: sceneOverride ?? null,
+          audio_data:     audioData ?? null,   // ★ v4
+        };
         const res = await fetch('http://127.0.0.1:8000/api/valuate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            asset_category: assetCategory,
-            description:    assetData,
-            is_zk_mode:     isZkMode,
-            scene_override: sceneOverride ?? null,   // ★ v3: 传递场景覆盖
-          }),
+          body: JSON.stringify(body),
         });
         if (!res.ok) throw new Error('HTTP Error');
         const data = await res.json();
-        // ★ v3: 读取后端返回的分类方法
-        setClassifyMethod(data.scene_classification?.method ?? null);
         setTimeout(() => {
           clearInterval(ticker);
           setValuationResult(data);
@@ -73,39 +139,12 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
           setIsCalculating(false);
         }, 4200);
       } catch {
-        // Mock fallback (API 未启动时)
-        const isImg = assetCategory === 'image';
-        // ★ v3: mock 时也尊重 sceneOverride
-        const mockScene = sceneOverride || (isImg ? 'illustration' : 'medical_sft');
-        const mockScores = isImg ? [92, 95, 96, 96, 89, 85] : [88, 82, 85, 93, 80, 91];
-        const mockMetrics = names.map((n, i) => ({ subject: n, score: mockScores[i], fullMark: 100 }));
-        setClassifyMethod(sceneOverride ? 'override' : 'rule');
+        // Mock fallback
+        const mock = buildMock(assetCategory, sceneOverride);
         setTimeout(() => {
           clearInterval(ticker);
-          setValuationResult({
-            status: 'success',
-            asset_hash: '0xMockDCT_A8F3B2C1D4E5...',
-            scene_classification: {
-              scene:        mockScene,
-              confidence:   sceneOverride ? 1.0 : 0.87,
-              quality_axis: isImg ? 'structure' : 'snr',
-              method:       sceneOverride ? 'override' : 'rule',
-            },
-            metrics: mockMetrics,
-            final_valuation: {
-              composite_quality: 88.5,
-              modality_tev:      isImg ? '50x' : '1x',
-              scene_multiplier:  isImg ? '1.5x' : '1.35x',
-              effective_weight:  isImg ? '75x' : '1.35x',
-              base_value:        isImg ? 13275 : 239,
-              dynamic_price:     isImg ? 16279 : 298,
-              option_premium:    isImg ? 4012  : 68,
-              sigma:             0.64,
-              market_demand:     isImg ? 22 : 28,
-              creator_ratio:     87.5,
-            },
-          });
-          setChartData(mockMetrics);
+          setValuationResult(mock);
+          setChartData(mock.metrics);
           setIsCalculating(false);
         }, 4200);
       }
@@ -118,14 +157,13 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
   const sc          = valuationResult?.scene_classification;
   const sceneConfig = sc ? (SCENE_LABELS[sc.scene] || SCENE_LABELS['chat_qa']) : null;
   const fv          = valuationResult?.final_valuation;
+  const meta        = valuationResult?.meta;
+  const methodBadge = METHOD_BADGE[sc?.method] ?? null;
+  const audioScene  = AUDIO_SCENE_LABELS[sc?.audio_scene] ?? null;
+  const adapterCls  = ADAPTER_LABEL[assetCategory] ?? ADAPTER_LABEL['text'];
 
-  // ★ v3: 分类方法徽章颜色
-  const methodBadge = {
-    rule:     { label: 'rule',     cls: 'text-slate-400 border-slate-600/40 bg-slate-900/40' },
-    ml:       { label: 'ML',       cls: 'text-cyan-400  border-cyan-500/40  bg-cyan-900/20'  },
-    hybrid:   { label: 'hybrid',   cls: 'text-purple-400 border-purple-500/40 bg-purple-900/20' },
-    override: { label: 'override', cls: 'text-amber-400 border-amber-500/40 bg-amber-900/20' },
-  }[classifyMethod ?? sc?.method] ?? null;
+  // ★ v4: onNext 携带完整 valuationResult
+  const handleNext = () => onNext(valuationResult);
 
   return (
     <div className="min-h-screen relative flex items-center justify-center bg-slate-950 p-6 font-sans">
@@ -137,11 +175,9 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
           <div className="flex flex-col gap-2">
             <div className="flex items-center space-x-3">
               <Network className="w-7 h-7 text-purple-400" />
-              {/* ★ v3 标题 */}
               <h1 className="text-xl font-extrabold tracking-wide text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-300">
-                多模态统一定价预言机 v3
+                多模态统一定价预言机 v4
               </h1>
-              {/* ★ 场景覆盖激活提示 */}
               {sceneOverride && (
                 <span className="flex items-center gap-1 px-2 py-0.5 rounded border border-amber-500/40 bg-amber-900/20 text-amber-300 text-[10px] font-mono">
                   <FlaskConical className="w-3 h-3" /> 调试·覆盖: {sceneOverride}
@@ -151,18 +187,25 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
 
             {/* Pipeline breadcrumb */}
             <div className="flex items-center flex-wrap gap-1 text-[10px] font-mono tracking-wider">
-              <span className={`px-2.5 py-1 rounded border ${assetCategory === 'image' ? 'bg-amber-900/20 text-amber-400 border-amber-500/30' : 'bg-blue-900/20 text-blue-400 border-blue-500/30'}`}>
-                {assetCategory === 'image' ? 'Image-Adapter' : 'Text-Adapter'}
+              <span className={`px-2.5 py-1 rounded border ${adapterCls.cls}`}>
+                {assetCategory === 'audio' && <Mic className="w-3 h-3 inline mr-1" />}
+                {adapterCls.label}
+                {meta?.adapter_version && <span className="ml-1 opacity-50">{meta.adapter_version}</span>}
               </span>
               <ArrowRight className="w-3 h-3 text-slate-600" />
               {sc ? (
                 <span className={`px-2.5 py-1 rounded border flex items-center gap-1 ${sceneConfig.bg} ${sceneConfig.color}`}>
                   <Tag className="w-3 h-3" /> {sceneConfig.label}
                   <span className="opacity-60 ml-1">{Math.round(sc.confidence * 100)}%</span>
-                  {/* ★ v3: 分类方法徽章 */}
                   {methodBadge && (
                     <span className={`ml-1 px-1.5 py-0.5 rounded border text-[9px] font-bold ${methodBadge.cls}`}>
                       {methodBadge.label}
+                    </span>
+                  )}
+                  {/* ★ v4: 音频细粒度标签 */}
+                  {audioScene && (
+                    <span className={`ml-1 px-1.5 py-0.5 rounded bg-slate-900/60 border border-slate-700 text-[9px] font-bold ${audioScene.color}`}>
+                      {audioScene.label}
                     </span>
                   )}
                 </span>
@@ -199,22 +242,30 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
                   <PolarAngleAxis dataKey="subject" tick={{ fill: '#94a3b8', fontSize: 10, fontWeight: 600 }} />
                   <PolarRadiusAxis angle={30} domain={[0, 100]} tick={false} axisLine={false} />
                   <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#8b5cf6', borderRadius: '8px' }} itemStyle={{ color: '#a78bfa' }} />
-                  <Radar dataKey="score" stroke="#8b5cf6" strokeWidth={2} fill="#7c3aed" fillOpacity={isCalculating ? 0.08 : 0.38} />
+                  <Radar
+                    dataKey="score" stroke="#8b5cf6" strokeWidth={2}
+                    fill={assetCategory === 'audio' ? '#10b981' : assetCategory === 'image' ? '#f59e0b' : '#7c3aed'}
+                    fillOpacity={isCalculating ? 0.08 : 0.38}
+                  />
                 </RadarChart>
               </ResponsiveContainer>
             </div>
-
             {sc && (
-              <div className="mt-3 flex items-center gap-3 text-xs text-slate-500">
+              <div className="mt-3 flex items-center gap-3 text-xs text-slate-500 flex-wrap">
                 <div className="flex items-center gap-1">
                   <Layers className="w-3.5 h-3.5 text-purple-500" />
                   <span>主要质量维度: <span className="text-purple-400 font-mono">{sc.quality_axis}</span></span>
                 </div>
-                {/* ★ v3: 展示分类方法 */}
                 {methodBadge && (
                   <div className="flex items-center gap-1">
                     <span className="text-slate-600">|</span>
-                    <span>引擎: <span className={`font-mono font-bold ${methodBadge.cls.split(' ')[0]}`}>{methodBadge.label}</span></span>
+                    <span>分类引擎: <span className={`font-mono font-bold ${methodBadge.cls.split(' ')[0]}`}>{methodBadge.label}</span></span>
+                  </div>
+                )}
+                {meta?.modality_label && (
+                  <div className="flex items-center gap-1">
+                    <span className="text-slate-600">|</span>
+                    <span className="text-slate-400">{meta.modality_label}</span>
                   </div>
                 )}
               </div>
@@ -226,9 +277,8 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
 
             {/* Execution log */}
             <div className="bg-[#0a0f18] rounded-2xl border border-slate-800 p-5" style={{ minHeight: 160 }}>
-              {/* ★ v3 标题 */}
               <h3 className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-3 border-b border-slate-800/80 pb-2">
-                Oracle Execution Log v3
+                Oracle Execution Log v4
               </h3>
               <div className="space-y-2">
                 {EXEC_STEPS.map((step, i) => (
@@ -265,7 +315,7 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
                     </div>
                     <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800">
                       <p className="text-[9px] text-slate-500 uppercase mb-1">模态 TEV</p>
-                      <p className={`text-lg font-bold ${assetCategory === 'image' ? 'text-amber-400' : 'text-blue-400'}`}>{fv?.modality_tev}</p>
+                      <p className={`text-lg font-bold ${assetCategory === 'audio' ? 'text-emerald-400' : assetCategory === 'image' ? 'text-amber-400' : 'text-blue-400'}`}>{fv?.modality_tev}</p>
                     </div>
                     <div className="bg-slate-950/60 p-3 rounded-xl border border-slate-800">
                       <p className="text-[9px] text-slate-500 uppercase mb-1 flex items-center gap-1">
@@ -297,14 +347,13 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
               )}
 
               <button
-                onClick={onNext}
+                onClick={handleNext}
                 disabled={valuationResult?.status === 'rejected'}
                 className={`w-full py-3.5 border rounded-xl font-bold transition-all flex items-center justify-center relative z-10 text-sm ${valuationResult?.status === 'rejected' ? 'bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed' : 'bg-purple-500/10 hover:bg-purple-500/20 border-purple-500/50 text-purple-300 shadow-[0_0_15px_rgba(139,92,246,0.1)] hover:shadow-[0_0_25px_rgba(139,92,246,0.25)]'}`}
               >
                 下发至智能合约 AMM 交易大盘 <ArrowRight className="w-4 h-4 ml-2" />
               </button>
             </div>
-
           </div>
         </div>
       </div>
