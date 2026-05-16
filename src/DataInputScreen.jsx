@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { UploadCloud, Cpu, Database, PlayCircle, ShieldCheck, Lock, Image as ImageIcon, FileText, Tag } from 'lucide-react';
+import { UploadCloud, Cpu, Database, PlayCircle, ShieldCheck, Lock, Image as ImageIcon, FileText, Tag, ChevronDown, ChevronUp, FlaskConical } from 'lucide-react';
 
 // 场景预设 Demo — 覆盖不同价值区间
 const DEMO_PRESETS = [
@@ -30,20 +30,37 @@ const DEMO_PRESETS = [
   },
 ];
 
-const DataInputScreen = ({ onComplete }) => {
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [statusText, setStatusText] = useState('');
-  const [enableZK, setEnableZK] = useState(true);
-  const [assetCategory, setAssetCategory] = useState('image');
-  const [inputText, setInputText] = useState('');          // 文本内容 / 图像描述
-  const [selectedImage, setSelectedImage] = useState(null);
-  const [activePreset, setActivePreset] = useState(null);
+// ★ v3 新增: 场景覆盖选项 (对应后端 scene_classifier 支持的所有场景)
+const SCENE_OVERRIDE_OPTIONS = [
+  { value: '',             label: '🤖 自动识别 (推荐)',   group: 'auto' },
+  // 文本场景
+  { value: 'medical_sft', label: '🏥 医疗 SFT  ×1.35',  group: 'text' },
+  { value: 'legal_doc',   label: '⚖️  法律文书  ×1.20',  group: 'text' },
+  { value: 'code_tech',   label: '💻 代码技术  ×1.10',  group: 'text' },
+  { value: 'creative',    label: '✍️  创意写作  ×0.90',  group: 'text' },
+  { value: 'chat_qa',     label: '💬 问答对话  ×0.80',  group: 'text' },
+  // 图像场景
+  { value: 'illustration',label: '🎨 原创插画  ×1.50',  group: 'image' },
+  { value: 'photo',       label: '📷 摄影作品  ×1.00',  group: 'image' },
+  { value: 'diagram',     label: '📊 图表图解  ×0.55',  group: 'image' },
+  { value: 'screenshot',  label: '🖥️  截图素材  ×0.25',  group: 'image' },
+];
 
-  // 图像模式下，描述文字是传给后端 Scene Classifier 的核心输入
+const DataInputScreen = ({ onComplete }) => {
+  const [isProcessing, setIsProcessing]   = useState(false);
+  const [progress, setProgress]           = useState(0);
+  const [statusText, setStatusText]       = useState('');
+  const [enableZK, setEnableZK]           = useState(true);
+  const [assetCategory, setAssetCategory] = useState('image');
+  const [inputText, setInputText]         = useState('');
+  const [selectedImage, setSelectedImage] = useState(null);
+  const [activePreset, setActivePreset]   = useState(null);
+  // ★ v3 新增
+  const [sceneOverride, setSceneOverride] = useState('');   // '' = 自动
+  const [showDebug, setShowDebug]         = useState(false);
+
   const getDescriptionForBackend = () => {
     if (assetCategory === 'text') return inputText;
-    // 图像: 用户填写的描述 > demo preset > 空描述 fallback
     return inputText || '原创图像';
   };
 
@@ -53,13 +70,16 @@ const DataInputScreen = ({ onComplete }) => {
     setInputText(preset.description);
     if (preset.category === 'image') setSelectedImage('preset_image.png');
     else setSelectedImage(null);
+    // 切换预设时清除场景覆盖，让分类器自动识别
+    setSceneOverride('');
   };
 
-  const getProcessingSteps = (category, isZk, description) => {
+  const getProcessingSteps = (category, isZk) => {
     const steps = [];
+    const overrideNote = sceneOverride ? ` [强制场景: ${sceneOverride}]` : '';
     if (isZk) {
-      steps.push({ p: 10, text: '【Stage 1 — 模态路由】初始化 WebAssembly 沙箱，识别模态类型...' });
-      steps.push({ p: 28, text: `【Stage 2 — 场景分类】SceneClassifier 分析 ${category === 'image' ? '图像描述' : '文本领域'}，识别子场景...' });
+      steps.push({ p: 10,  text: '【Stage 1 — 模态路由】初始化 WebAssembly 沙箱，识别模态类型...' });
+      steps.push({ p: 28,  text: `【Stage 2 — 场景分类】SceneClassifier v3 分析 ${category === 'image' ? '图像描述' : '文本领域'}，识别子场景...${overrideNote}` });
       if (category === 'image') {
         steps.push({ p: 45, text: '【Stage 3 — 特征提取】ImageAdapter: LAION-Aesthetics 美学评估 + DWT 隐写鲁棒性...' });
         steps.push({ p: 62, text: '【Stage 3 — 稀缺度】CLIP 512维特征对齐，计算画派风格稀缺度...' });
@@ -67,11 +87,11 @@ const DataInputScreen = ({ onComplete }) => {
         steps.push({ p: 45, text: '【Stage 3 — 特征提取】TextAdapter: 场景专项 SNR + Shannon 熵 + 废话熔断检测...' });
         steps.push({ p: 62, text: '【Stage 3 — 图谱构建】GraphRAG 实体拓扑密度 + KNN-Shapley 边际贡献评估...' });
       }
-      steps.push({ p: 78, text: '【Stage 4 — TEV 标准化】双层乘数 (模态权重 × 场景子权重) 映射至统一定价框架...' });
-      steps.push({ p: 92, text: '【zk-SNARK】生成零知识证明凭证，本地明文安全销毁...' });
+      steps.push({ p: 78,  text: '【Stage 4 — TEV 标准化】双层乘数 (模态权重 × 场景子权重) 映射至统一定价框架...' });
+      steps.push({ p: 92,  text: '【zk-SNARK】生成零知识证明凭证，本地明文安全销毁...' });
       steps.push({ p: 100, text: '凭证上链成功！向预言机节点发起 RPC 定价请求...' });
     } else {
-      steps.push({ p: 50, text: `正在将 ${category} 资产上传至中心化预言机...` });
+      steps.push({ p: 50,  text: `正在将 ${category} 资产上传至中心化预言机...` });
       steps.push({ p: 100, text: '确权完成！准备进入统一定价框架...' });
     }
     return steps;
@@ -85,7 +105,7 @@ const DataInputScreen = ({ onComplete }) => {
     setIsProcessing(true);
     setProgress(0);
 
-    const steps = getProcessingSteps(assetCategory, enableZK, desc);
+    const steps = getProcessingSteps(assetCategory, enableZK);
     let cur = 0;
     const interval = setInterval(() => {
       if (cur < steps.length) {
@@ -94,10 +114,15 @@ const DataInputScreen = ({ onComplete }) => {
         cur++;
       } else {
         clearInterval(interval);
-        setTimeout(() => onComplete(desc, assetCategory, enableZK), 1200);
+        // ★ 第 4 个参数传递 sceneOverride (null 代表自动)
+        setTimeout(() => onComplete(desc, assetCategory, enableZK, sceneOverride || null), 1200);
       }
     }, 750);
   };
+
+  // 当前场景覆盖的显示标签
+  const overrideLabel = SCENE_OVERRIDE_OPTIONS.find(o => o.value === sceneOverride)?.label || '🤖 自动识别';
+  const isOverrideActive = Boolean(sceneOverride);
 
   return (
     <div className="min-h-screen relative flex items-center justify-center bg-slate-950 p-6 font-sans">
@@ -110,9 +135,11 @@ const DataInputScreen = ({ onComplete }) => {
             <Database className="w-7 h-7 text-emerald-400" />
             <h1 className="text-xl font-bold text-white">智数知权 · 多模态资产录入网关</h1>
           </div>
+          {/* ★ v3 版本标签 */}
           <div className="flex items-center gap-2 text-xs text-slate-500 font-mono">
-            <Tag className="w-3.5 h-3.5" />
-            <span>Scene Classifier v2.1</span>
+            <Tag className="w-3.5 h-3.5 text-purple-400" />
+            <span className="text-purple-400 font-semibold">Scene Classifier</span>
+            <span className="px-1.5 py-0.5 rounded bg-purple-900/40 border border-purple-500/30 text-purple-300 text-[10px] font-bold tracking-wider">v3 · hybrid ML</span>
           </div>
         </div>
 
@@ -159,8 +186,7 @@ const DataInputScreen = ({ onComplete }) => {
               <textarea
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
-                placeholder="输入需要确权的语料 (医疗 / 法律 / 代码 / 创意写作 / 问答对话)...
-Scene Classifier 将自动识别领域场景并调整定价权重。"
+                placeholder={"输入需要确权的语料 (医疗 / 法律 / 代码 / 创意写作 / 问答对话)...\nScene Classifier v3 将自动识别领域场景并调整定价权重。"}
                 className="w-full h-36 bg-slate-950/50 border border-slate-700 rounded-xl p-4 font-mono text-sm text-blue-400 placeholder-slate-600 focus:outline-none focus:border-blue-500 resize-none"
               />
             )}
@@ -178,7 +204,7 @@ Scene Classifier 将自动识别领域场景并调整定价权重。"
                     <><UploadCloud className="w-6 h-6 text-slate-500 mb-1" /><p className="text-xs text-slate-300 font-bold">点击上传商业插画原稿</p></>
                   )}
                 </div>
-                {/* ★ 新增: 画作描述输入 — Scene Classifier 的核心输入 */}
+                {/* 画作描述输入 */}
                 <div>
                   <p className="text-[10px] text-slate-500 mb-1.5 flex items-center gap-1">
                     <Tag className="w-3 h-3" />
@@ -187,13 +213,55 @@ Scene Classifier 将自动识别领域场景并调整定价权重。"
                   <textarea
                     value={inputText}
                     onChange={(e) => setInputText(e.target.value)}
-                    placeholder="例: 赛博朋克风格原创插画，机甲少女，精细光影，4k手绘，原画师作品
-或: 普通照片 / 浏览器截图 / 技术架构图..."
+                    placeholder={"例: 赛博朋克风格原创插画，机甲少女，精细光影，4k手绘，原画师作品\n或: 普通照片 / 浏览器截图 / 技术架构图..."}
                     className="w-full h-20 bg-slate-950/50 border border-slate-700 rounded-xl p-3 font-mono text-xs text-amber-400 placeholder-slate-600 focus:outline-none focus:border-amber-500 resize-none"
                   />
                 </div>
               </div>
             )}
+
+            {/* ★ v3 新增: 调试面板 — 场景覆盖 */}
+            <div className="rounded-xl border border-slate-800 overflow-hidden">
+              <button
+                onClick={() => setShowDebug(!showDebug)}
+                className={`w-full flex items-center justify-between px-3.5 py-2.5 text-xs font-mono transition-colors ${showDebug ? 'bg-slate-800/80 text-slate-300' : 'bg-slate-950/50 text-slate-500 hover:text-slate-400'}`}
+              >
+                <span className="flex items-center gap-2">
+                  <FlaskConical className={`w-3.5 h-3.5 ${isOverrideActive ? 'text-amber-400' : 'text-slate-500'}`} />
+                  调试 · 场景覆盖
+                  {isOverrideActive && (
+                    <span className="px-1.5 py-0.5 rounded bg-amber-900/40 border border-amber-500/40 text-amber-300 text-[9px] font-bold tracking-wider">
+                      已覆盖: {sceneOverride}
+                    </span>
+                  )}
+                </span>
+                {showDebug ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              </button>
+
+              {showDebug && (
+                <div className="p-3 bg-slate-950/70 border-t border-slate-800 space-y-2">
+                  <p className="text-[10px] text-slate-500">
+                    强制指定场景类型，绕过 SceneClassifier 自动识别。用于测试不同场景定价路径、复现边界案例。
+                  </p>
+                  <select
+                    value={sceneOverride}
+                    onChange={(e) => setSceneOverride(e.target.value)}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-300 focus:outline-none focus:border-purple-500"
+                  >
+                    {SCENE_OVERRIDE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                  {isOverrideActive && (
+                    <p className="text-[10px] text-amber-400 flex items-center gap-1">
+                      ⚠ 场景覆盖已激活，将跳过 SceneClassifier v3 的 hybrid ML 推理
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
 
             <button
               onClick={processData}

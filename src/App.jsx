@@ -4,34 +4,40 @@ import OracleValuationScreen from './OracleValuationScreen';
 import SmartSplitScreen from './SmartSplitScreen';
 
 function App() {
-  const [currentStep, setCurrentStep] = useState(1);
-  const [assetData, setAssetData] = useState(""); 
-  const [assetCategory, setAssetCategory] = useState("text"); // 新增：多模态数据类别
-  const [isZkMode, setIsZkMode] = useState(true);
+  const [currentStep, setCurrentStep]     = useState(1);
+  const [assetData, setAssetData]         = useState('');
+  const [assetCategory, setAssetCategory] = useState('text');
+  const [isZkMode, setIsZkMode]           = useState(true);
+  const [sceneOverride, setSceneOverride] = useState(null); // ★ v3: 场景覆盖调试参数
 
   const handleRestart = () => {
     setCurrentStep(1);
-    setAssetData(""); 
-    setAssetCategory("text");
+    setAssetData('');
+    setAssetCategory('text');
+    setSceneOverride(null); // 重置时清除覆盖
   };
 
   return (
     <div className="font-sans antialiased text-slate-200 selection:bg-teal-500/30">
       {currentStep === 1 && (
-        <DataInputScreen onComplete={(data, category, zkEnabled) => {
-          setAssetData(data); 
-          setAssetCategory(category); // 接收并保存多模态类别
-          setIsZkMode(zkEnabled);
-          setCurrentStep(2);
-        }} />
+        <DataInputScreen
+          onComplete={(data, category, zkEnabled, override) => {
+            setAssetData(data);
+            setAssetCategory(category);
+            setIsZkMode(zkEnabled);
+            setSceneOverride(override ?? null); // ★ 接收第 4 参数
+            setCurrentStep(2);
+          }}
+        />
       )}
-      
+
       {currentStep === 2 && (
-        <OracleValuationScreen 
-          assetData={assetData} 
-          assetCategory={assetCategory} // 透传给预言机
-          isZkMode={isZkMode} 
-          onNext={() => setCurrentStep(3)} 
+        <OracleValuationScreen
+          assetData={assetData}
+          assetCategory={assetCategory}
+          isZkMode={isZkMode}
+          sceneOverride={sceneOverride} // ★ 透传给预言机
+          onNext={() => setCurrentStep(3)}
         />
       )}
 
