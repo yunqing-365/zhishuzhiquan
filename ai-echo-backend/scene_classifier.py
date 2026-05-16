@@ -214,7 +214,9 @@ class SceneClassifier:
 
     def classify_text(self, text: str) -> SceneResult:
         # 最低长度门槛 → noise
-        if len(text.split()) < 8 and len(text) < 40:
+        # 注意: 中文没有空格，text.split() 对纯中文文本始终返回 1 个 token
+        # 所以只用字符数判断，不用词数
+        if len(text) < 20:
             return self._noise()
 
         # 每个场景的综合得分
