@@ -28,13 +28,14 @@ const SCENE_AMM_CONFIG = {
   general:      { alpha: 25, domainName: 'Audio General (多模态基础集)', b2bCaller: 'Whisper-Finetuner',  icon: '🎙️' },
 };
 
-// 音频细粒度场景覆盖（比 TEV 场景更具体）
+// 音频细粒度场景覆盖（★ v4 对齐 scene_classifier.py AUDIO_SCENE_WEIGHTS，补全6类）
 const AUDIO_SCENE_AMM = {
-  speech_medical: { alpha: 38, domainName: 'Medical ASR (临床语音转录)',  b2bCaller: 'ClinicalASR-Corp',  icon: '🏥' },
-  speech_legal:   { alpha: 32, domainName: 'Legal ASR (庭审语音结构化)',  b2bCaller: 'CourtBot-Platform', icon: '⚖️' },
-  speech_edu:     { alpha: 20, domainName: 'Edu TTS (教育语音合成)',      b2bCaller: 'EduBot-Trainer',    icon: '📚' },
-  music_original: { alpha: 22, domainName: 'Music Gen (音频生成训练集)',   b2bCaller: 'MusicLM-Studio',    icon: '🎵' },
-  ambient_sfx:    { alpha: 14, domainName: 'SFX Pack (游戏音效数据集)',   b2bCaller: 'SoundGen-Engine',   icon: '🌿' },
+  speech_medical: { alpha: 38, domainName: 'Medical ASR (临床语音转录)',   b2bCaller: 'ClinicalASR-Corp',  icon: '🏥' },
+  speech_legal:   { alpha: 32, domainName: 'Legal ASR (庭审语音结构化)',   b2bCaller: 'CourtBot-Platform', icon: '⚖️' },
+  speech_edu:     { alpha: 20, domainName: 'Edu TTS (教育语音合成)',       b2bCaller: 'EduBot-Trainer',    icon: '📚' },
+  music_original: { alpha: 22, domainName: 'Music Gen (音频生成训练集)',    b2bCaller: 'MusicLM-Studio',    icon: '🎵' },
+  ambient_sfx:    { alpha: 14, domainName: 'SFX Pack (游戏音效数据集)',    b2bCaller: 'SoundGen-Engine',   icon: '🌿' },
+  noise:          { alpha:  0, domainName: 'Noise (无效音频，拒绝入库)',   b2bCaller: 'N/A',               icon: '🚫' },
 };
 
 // 模态 paywall 拦截描述

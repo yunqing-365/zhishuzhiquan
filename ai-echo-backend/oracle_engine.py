@@ -119,23 +119,16 @@ def _image_classify(asset) -> tuple[SceneResult, Optional[str]]:
 
 
 def _audio_classify(asset) -> tuple[SceneResult, Optional[str]]:
+    # ★ v4: 改用 SceneClassifier.classify_audio() 双通道融合分类
+    #   声学通道(0.65) + 文本关键词通道(0.35)，method 区分 fusion/text_proxy/acoustic
     y, sr_rate = None, 0
     if asset.audio_data:
         try:
             y, sr_rate = _decode_audio_b64(asset.audio_data)
         except Exception:
             pass
-    tev_scene, confidence, audio_scene = classify_audio_scene(y, sr_rate, asset.description)
-    sr = SceneResult(
-        scene=tev_scene,
-        confidence=confidence,
-        weight_multiplier=TEXT_SCENE_WEIGHTS.get(tev_scene, 1.0),
-        quality_axis="snr",
-        composite_weights=SCENE_COMPOSITE_WEIGHTS.get(
-            tev_scene, SCENE_COMPOSITE_WEIGHTS["chat_qa"]
-        ),
-    )
-    return sr, audio_scene
+    result = _clf.classify_audio(asset.description, y=y, sr=sr_rate or 16000)
+    return result, result.audio_scene
 
 
 def _build_registry(clf: SceneClassifier) -> Dict[str, ModalityConfig]:
@@ -316,18 +309,20 @@ async def valuate(asset: AssetData):
 @app.get("/api/scenes")
 async def list_scenes():
     """从注册表动态生成，新增模态自动出现，无需手动同步"""
-    from scene_classifier import TEXT_SCENE_WEIGHTS, IMAGE_SCENE_WEIGHTS
+    from scene_classifier import TEXT_SCENE_WEIGHTS, IMAGE_SCENE_WEIGHTS, AUDIO_SCENE_WEIGHTS, AUDIO_SCENE_TO_TEV
     from scoring import AMM_SCENE_CONFIG
     return {
         "supported_modalities": {
             k: {"label": v.label, "tev": v.tev, "adapter_version": v.adapter_version}
             for k, v in _registry.items()
         },
-        "text_scenes":    TEXT_SCENE_WEIGHTS,
-        "image_scenes":   IMAGE_SCENE_WEIGHTS,
-        "modality_tev":   MODALITY_TEV,
-        "amm_scene_config": AMM_SCENE_CONFIG,   # ★ v4: 前端可拉取完整 AMM 参数
-        "domain_demand":  DOMAIN_DEMAND,         # 向后兼容
+        "text_scenes":       TEXT_SCENE_WEIGHTS,
+        "image_scenes":      IMAGE_SCENE_WEIGHTS,
+        "audio_scenes":      AUDIO_SCENE_WEIGHTS,        # ★ v4: 音频细粒度场景权重
+        "audio_scene_to_tev": AUDIO_SCENE_TO_TEV,        # ★ v4: 前端场景映射表
+        "modality_tev":      MODALITY_TEV,
+        "amm_scene_config":  AMM_SCENE_CONFIG,
+        "domain_demand":     DOMAIN_DEMAND,              # 向后兼容
     }
 
 

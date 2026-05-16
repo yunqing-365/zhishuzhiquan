@@ -27,12 +27,16 @@ const AUDIO_SCENE_LABELS = {
   noise:          { label: '🚫 噪声',      color: 'text-red-400' },
 };
 
-// 分类方法徽章
+// 分类方法徽章（★ v4 新增: acoustic / fusion / text_proxy）
 const METHOD_BADGE = {
-  rule:     { label: 'rule',     cls: 'text-slate-400 border-slate-600/40 bg-slate-900/40' },
-  ml:       { label: 'ML',       cls: 'text-cyan-400   border-cyan-500/40  bg-cyan-900/20'  },
-  hybrid:   { label: 'hybrid',   cls: 'text-purple-400 border-purple-500/40 bg-purple-900/20' },
-  override: { label: 'override', cls: 'text-amber-400  border-amber-500/40 bg-amber-900/20' },
+  rule:        { label: 'rule',        cls: 'text-slate-400  border-slate-600/40  bg-slate-900/40'  },
+  ml:          { label: 'ML',          cls: 'text-cyan-400   border-cyan-500/40   bg-cyan-900/20'   },
+  hybrid:      { label: 'hybrid',      cls: 'text-purple-400 border-purple-500/40 bg-purple-900/20' },
+  override:    { label: 'override',    cls: 'text-amber-400  border-amber-500/40  bg-amber-900/20'  },
+  // 音频双通道（scene_classifier v4）
+  acoustic:    { label: '🎙 acoustic',   cls: 'text-emerald-400 border-emerald-500/40 bg-emerald-900/20' },
+  fusion:      { label: '⚡ fusion',     cls: 'text-teal-400   border-teal-500/40   bg-teal-900/20'    },
+  text_proxy:  { label: '📝 text_proxy', cls: 'text-slate-400  border-slate-600/40  bg-slate-900/40'  },
 };
 
 // 模态 adapter 标签
@@ -43,30 +47,106 @@ const ADAPTER_LABEL = {
 };
 
 // Mock 数据（API 未启动时）
+// ── 音频细粒度场景 mock 参数表（与 scene_classifier.py AUDIO_SCENE_WEIGHTS 对齐）──
+// amm_alpha / market_demand 与后端 scoring.py AMM_SCENE_CONFIG 同步
+const AUDIO_SCENE_MOCK = {
+  speech_medical: { alpha: 38, demand: 28, baseVal: 22400, dynPrice: 27430, optPremium: 7250,
+                    method: 'fusion',     scores: [87, 90, 84, 95, 88, 91] },
+  speech_legal:   { alpha: 32, demand: 22, baseVal: 18900, dynPrice: 23100, optPremium: 5800,
+                    method: 'fusion',     scores: [84, 88, 82, 90, 85, 89] },
+  speech_edu:     { alpha: 20, demand: 15, baseVal: 10200, dynPrice: 12400, optPremium: 2900,
+                    method: 'text_proxy', scores: [80, 85, 78, 82, 83, 84] },
+  music_original: { alpha: 22, demand: 18, baseVal: 14300, dynPrice: 17500, optPremium: 4200,
+                    method: 'acoustic',   scores: [85, 82, 91, 88, 78, 86] },
+  ambient_sfx:    { alpha: 14, demand: 10, baseVal:  6800, dynPrice:  8200, optPremium: 1600,
+                    method: 'acoustic',   scores: [78, 76, 80, 72, 70, 75] },
+  noise:          { alpha:  0, demand:  0, baseVal:   120, dynPrice:   140, optPremium:   20,
+                    method: 'acoustic',   scores: [20, 18, 22, 10, 12, 15] },
+};
+
 const buildMock = (assetCategory, sceneOverride) => {
   const isImg   = assetCategory === 'image';
   const isAudio = assetCategory === 'audio';
-  const mockScene = sceneOverride || (isImg ? 'illustration' : isAudio ? 'medical_sft' : 'medical_sft');
-  const tev = isImg ? '50x' : isAudio ? '120x' : '1x';
-  const scMult = isImg ? '1.5x' : '1.35x';
-  const effW = isImg ? '75x' : isAudio ? '162x' : '1.35x';
-  const baseVal = isImg ? 13275 : isAudio ? 22400 : 239;
-  const dynPrice = isImg ? 16279 : isAudio ? 27430 : 298;
-  const optPremium = isImg ? 4012 : isAudio ? 7250 : 68;
+
+  // 音频模态：从 AUDIO_SCENE_MOCK 查表，支持 sceneOverride 切换场景
+  if (isAudio) {
+    // sceneOverride 传入的是 TEV 场景（如 medical_sft），需反向找 audio_scene
+    // 默认展示 speech_medical
+    const TEV_TO_AUDIO = {
+      medical_sft: 'speech_medical',
+      legal_doc:   'speech_legal',
+      chat_qa:     'speech_edu',
+      creative:    'music_original',
+      general:     'ambient_sfx',
+      noise:       'noise',
+    };
+    const audioScene = (sceneOverride && TEV_TO_AUDIO[sceneOverride])
+      ? TEV_TO_AUDIO[sceneOverride]
+      : 'speech_medical';
+    const p = AUDIO_SCENE_MOCK[audioScene] || AUDIO_SCENE_MOCK.speech_medical;
+    const tevScene = sceneOverride || 'medical_sft';
+    // scene_multiplier 从 AUDIO_SCENE_WEIGHTS 对应的 TEXT_SCENE_WEIGHTS 取
+    const scMultMap = {
+      speech_medical: '1.35x', speech_legal: '1.20x', speech_edu: '0.80x',
+      music_original: '0.90x', ambient_sfx:  '1.00x', noise:      '0.05x',
+    };
+    return {
+      status: 'success',
+      asset_hash: '0xAFP_mock_acoustic_7F2A...',
+      scene_classification: {
+        scene: tevScene,
+        confidence: sceneOverride ? 1.0 : 0.87,
+        quality_axis: 'snr',
+        method: sceneOverride ? 'override' : p.method,  // ★ v4: 真实 method 类型
+        audio_scene: audioScene,                         // ★ v4: 细粒度标签
+      },
+      metrics: [
+        '频谱熵(信息密度)', 'PESQ感知信噪比', '语音指令连贯性',
+        '音频库稀缺度', 'ASR微调增益', 'KNN-Shapley贡献度',
+      ].map((n, i) => ({ subject: n, score: p.scores[i], fullMark: 100 })),
+      final_valuation: {
+        composite_quality: Math.round(p.scores.reduce((a,b)=>a+b,0)/p.scores.length * 10) / 10,
+        modality_tev: '120x',
+        scene_multiplier: scMultMap[audioScene] || '1.00x',
+        effective_weight: '162x',
+        base_value:    p.baseVal,
+        dynamic_price: p.dynPrice,
+        option_premium: p.optPremium,
+        sigma: 0.64,
+        market_demand: p.demand,
+        amm_alpha:     p.alpha,   // ★ v4: 6种场景各有不同斜率
+        creator_ratio: 87.5,
+      },
+      meta: {
+        modality: 'audio',
+        modality_label: '音频语音',
+        adapter_version: 'v1',
+        shapley_confidence: 0.82,
+      },
+    };
+  }
+
+  // 文本 / 图像模态（保持原逻辑）
+  const mockScene = sceneOverride || (isImg ? 'illustration' : 'medical_sft');
+  const tev   = isImg ? '50x'    : '1x';
+  const scMult= isImg ? '1.5x'   : '1.35x';
+  const effW  = isImg ? '75x'    : '1.35x';
+  const baseVal   = isImg ? 13275 : 239;
+  const dynPrice  = isImg ? 16279 : 298;
+  const optPremium= isImg ? 4012  : 68;
   const metricNames = {
     text:  ['信息熵密度(抗废话)', '场景信噪比', '实体拓扑密度(GraphRAG)', '语料库稀缺度', '大模型微调增益', 'KNN-Shapley贡献度'],
     image: ['CLIP语义对齐度', '频域隐写鲁棒性(DWT)', 'LAION美学评级', '画派风格稀缺度', 'LoRA微调增益', 'KNN-Shapley贡献度'],
-    audio: ['频谱熵(信息密度)', 'PESQ感知信噪比', '语音指令连贯性', '音频库稀缺度', 'ASR微调增益', 'KNN-Shapley贡献度'],
   }[assetCategory] || [];
-  const scores = isImg ? [92, 95, 96, 96, 89, 85] : isAudio ? [87, 90, 84, 95, 88, 91] : [88, 82, 85, 93, 80, 91];
+  const scores = isImg ? [92, 95, 96, 96, 89, 85] : [88, 82, 85, 93, 80, 91];
   return {
     status: 'success',
-    asset_hash: isAudio ? '0xAFP_mock_acoustic_7F2A...' : isImg ? '0xAFP_mock_perceptual_A8F3...' : '0xTXT_mock_simhash_C9D2...',
+    asset_hash: isImg ? '0xAFP_mock_perceptual_A8F3...' : '0xTXT_mock_simhash_C9D2...',
     scene_classification: {
       scene: mockScene, confidence: sceneOverride ? 1.0 : 0.87,
-      quality_axis: isAudio ? 'snr' : isImg ? 'structure' : 'snr',
+      quality_axis: isImg ? 'structure' : 'snr',
       method: sceneOverride ? 'override' : 'rule',
-      audio_scene: isAudio ? 'speech_medical' : null,
+      audio_scene: null,
     },
     metrics: metricNames.map((n, i) => ({ subject: n, score: scores[i], fullMark: 100 })),
     final_valuation: {
@@ -74,14 +154,15 @@ const buildMock = (assetCategory, sceneOverride) => {
       scene_multiplier: scMult, effective_weight: effW,
       base_value: baseVal, dynamic_price: dynPrice,
       option_premium: optPremium, sigma: 0.64,
-      market_demand: isAudio ? 26 : isImg ? 22 : 28,
-      amm_alpha:     isAudio ? 32 : isImg ? 20 : 32,   // ★ v4: mock 也带 amm_alpha
+      market_demand: isImg ? 22 : 28,
+      amm_alpha:     isImg ? 20 : 32,
       creator_ratio: 87.5,
     },
     meta: {
       modality: assetCategory,
-      modality_label: isAudio ? '音频语音' : isImg ? '图像画作' : '文本语料',
-      adapter_version: isAudio ? 'v1' : 'v2',
+      modality_label: isImg ? '图像画作' : '文本语料',
+      adapter_version: 'v2',
+      shapley_confidence: 0.85,
     },
   };
 };
