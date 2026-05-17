@@ -92,7 +92,7 @@ const buildMock = (assetCategory, sceneOverride) => {
     };
     return {
       status: 'success',
-      asset_hash: '0xAFP_mock_acoustic_7F2A...',
+      asset_hash: '0xAFP_mock_' + Math.abs(Array.from(sceneOverride||'speech_medical').reduce((h,c)=>Math.imul(31,h)+c.charCodeAt(0)|0,0)).toString(16).toUpperCase().padStart(8,'0') + '_DEMO',
       scene_classification: {
         scene: tevScene,
         confidence: sceneOverride ? 1.0 : 0.87,
@@ -141,7 +141,12 @@ const buildMock = (assetCategory, sceneOverride) => {
   const scores = isImg ? [92, 95, 96, 96, 89, 85] : [88, 82, 85, 93, 80, 91];
   return {
     status: 'success',
-    asset_hash: isImg ? '0xAFP_mock_perceptual_A8F3...' : '0xTXT_mock_simhash_C9D2...',
+    asset_hash: (() => {
+      const seed = Array.from((assetCategory + (sceneOverride||mockScene)).slice(0,12))
+        .reduce((h,c) => Math.imul(31,h)+c.charCodeAt(0)|0, 0);
+      const hex = Math.abs(seed).toString(16).toUpperCase().padStart(8,'0');
+      return isImg ? '0xPH_mock_' + hex + '_DEMO' : '0xSH_mock_' + hex + '_DEMO';
+    })(),
     scene_classification: {
       scene: mockScene, confidence: sceneOverride ? 1.0 : 0.87,
       quality_axis: isImg ? 'structure' : 'snr',
@@ -173,12 +178,15 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
   const [calcStep, setCalcStep]               = useState(0);
   const [chartData, setChartData]             = useState([]);
   const [valuationResult, setValuationResult] = useState(null);
+  // ★ v5: 数据来源状态 — 'api' | 'mock' | 'error'
+  const [dataSource, setDataSource]           = useState(null);
+  const [apiError, setApiError]               = useState(null);
 
   const EXEC_STEPS = [
     `[Stage 1] 模态路由 → [${(ADAPTER_LABEL[assetCategory]?.label || 'Adapter').toUpperCase()}] 初始化，向量知识库接入...`,
     sceneOverride
       ? `[Stage 2] 场景覆盖已激活 → 跳过 SceneClassifier，强制场景: ${sceneOverride}`
-      : `[Stage 2] SceneClassifier v3 hybrid 引擎 → 识别 ${assetCategory === 'audio' ? '音频场景 (ZCR+频谱质心+关键词)' : '文本/图像场景子类型'}...`,
+      : `[Stage 2] SceneClassifier v4 dual-channel → 识别 ${assetCategory === 'audio' ? '音频场景 (声学×0.65 + 文本KWS×0.35)' : '文本/图像场景子类型 (rule+ML hybrid)'}...`,
     `[Stage 3] 场景自适应特征提取 → ${assetCategory === 'audio' ? 'MFCC嵌入 + PESQ代理SNR + 频谱熵' : assetCategory === 'image' ? 'pHash + LAION美学 + DWT' : 'Shannon熵 + GraphRAG + SimHash'}...`,
     `[Stage 4] TEV 双层乘数 → 模态基础倍率 × 场景权重 → 复合评分...`,
     '[Stage 5] AMM 联合曲线 + KNN-Shapley + 实物期权 → 统一定价上链...',
@@ -197,33 +205,59 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
       if (cur < EXEC_STEPS.length) { setCalcStep(cur); cur++; }
     }, 750);
 
+    // ★ v5: 归一化后端 metrics 格式
+    const normalizeMetrics = (raw) => {
+      if (!raw || !Array.isArray(raw)) return null;
+      // 后端格式: [{subject, score, fullMark}] 或 [{name, value}]
+      return raw.map(m => ({
+        subject:  m.subject ?? m.name ?? m.label ?? '维度',
+        score:    Number(m.score  ?? m.value ?? 0),
+        fullMark: m.fullMark ?? 100,
+      }));
+    };
+
     const fetchValuation = async () => {
+      // ★ v5: 5 秒超时，避免后端未启动时 hang 住
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 5000);
       try {
         const body = {
           asset_category: assetCategory,
           description:    assetData,
           is_zk_mode:     isZkMode,
           scene_override: sceneOverride ?? null,
-          audio_data:     audioData ?? null,   // ★ v4
+          audio_data:     audioData ?? null,
         };
         const res = await fetch('http://127.0.0.1:8000/api/valuate', {
-          method: 'POST',
+          method:  'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
+          body:    JSON.stringify(body),
+          signal:  controller.signal,
         });
-        if (!res.ok) throw new Error('HTTP Error');
+        clearTimeout(timer);
+        if (!res.ok) {
+          const errText = await res.text().catch(() => 'HTTP Error');
+          throw new Error(`HTTP ${res.status}: ${errText.slice(0, 120)}`);
+        }
         const data = await res.json();
+        const metrics = normalizeMetrics(data.metrics);
         setTimeout(() => {
           clearInterval(ticker);
+          setDataSource('api');          // ★ v5: 标记真实 API
           setValuationResult(data);
-          if (data.metrics) setChartData(data.metrics);
+          if (metrics) setChartData(metrics);
           setIsCalculating(false);
         }, 4200);
-      } catch {
-        // Mock fallback
+      } catch (err) {
+        clearTimeout(timer);
+        // ★ v5: 区分超时 vs 网络错误 vs 服务器错误
+        const isTimeout = err.name === 'AbortError';
+        const errMsg = isTimeout ? '后端连接超时 (5s)' : err.message;
         const mock = buildMock(assetCategory, sceneOverride);
         setTimeout(() => {
           clearInterval(ticker);
+          setDataSource('mock');         // ★ v5: 标记 mock 来源
+          setApiError(errMsg);           // ★ v5: 保存错误信息
           setValuationResult(mock);
           setChartData(mock.metrics);
           setIsCalculating(false);
@@ -302,13 +336,33 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
             </div>
           </div>
 
-          <div className={`px-4 py-2 rounded-full border text-sm font-bold flex items-center ${isCalculating ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'}`}>
-            {isCalculating ? <Activity className="w-4 h-4 mr-2 animate-spin" /> : <CheckCircle2 className="w-4 h-4 mr-2" />}
-            {isCalculating ? 'Computing...' : 'Valuation Complete'}
+          <div className="flex items-center gap-2">
+            {/* ★ v5: 数据来源徽章 */}
+            {dataSource === 'api' && (
+              <span className="px-2.5 py-1 rounded-full border border-emerald-500/40 bg-emerald-900/20 text-emerald-400 text-[10px] font-mono font-bold">
+                ● 真实 API
+              </span>
+            )}
+            {dataSource === 'mock' && (
+              <span className="px-2.5 py-1 rounded-full border border-amber-500/40 bg-amber-900/20 text-amber-400 text-[10px] font-mono font-bold" title={apiError || ''}>
+                ◎ Mock 降级
+              </span>
+            )}
+            <div className={`px-4 py-2 rounded-full border text-sm font-bold flex items-center ${isCalculating ? 'bg-amber-500/10 border-amber-500/30 text-amber-400' : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400'}`}>
+              {isCalculating ? <Activity className="w-4 h-4 mr-2 animate-spin" /> : <CheckCircle2 className="w-4 h-4 mr-2" />}
+              {isCalculating ? 'Computing...' : 'Valuation Complete'}
+            </div>
           </div>
         </div>
 
-        {/* Main grid */}
+        {/* ★ v5: Mock 降级提示条 */}
+        {dataSource === 'mock' && (
+          <div className="mb-4 px-4 py-2 rounded-xl border border-amber-500/30 bg-amber-950/30 flex items-center gap-2 text-[11px] font-mono text-amber-400">
+            <span className="shrink-0">⚠ Mock 降级模式</span>
+            <span className="text-amber-600 truncate">后端未响应 — {apiError || '连接失败'} — 以下数据为本地仿真，不代表真实估值</span>
+            <span className="ml-auto shrink-0 text-amber-600">启动后端: cd ai-echo-backend && uvicorn oracle_engine:app</span>
+          </div>
+        )}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 flex-1">
 
           {/* Left: Radar chart */}

@@ -1,7 +1,11 @@
-import React, { useState } from 'react';
-import { UploadCloud, Cpu, Database, PlayCircle, ShieldCheck, Lock, Image as ImageIcon, FileText, Tag, ChevronDown, ChevronUp, FlaskConical } from 'lucide-react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import {
+  UploadCloud, Cpu, Database, PlayCircle, ShieldCheck, Lock,
+  Image as ImageIcon, FileText, Tag, ChevronDown, ChevronUp,
+  FlaskConical, Mic, StopCircle, Waveform,
+} from 'lucide-react';
 
-// 场景预设 Demo — 覆盖不同价值区间
+// ─── Demo 预设（★ v4: 补充音频场景）────────────────────────────────────
 const DEMO_PRESETS = [
   {
     label: '赛博朋克插画 (高价值)',
@@ -28,49 +32,213 @@ const DEMO_PRESETS = [
     category: 'image',
     description: '浏览器截图，Chrome界面截屏，普通桌面UI截图',
   },
+  // ★ v4 音频预设
+  {
+    label: '临床语音转录 (speech_medical)',
+    category: 'audio',
+    description: '医院手术室术后访谈录音，临床医生口述：患者诊断为慢性肾功能衰竭，肌酐水平458μmol/L，建议透析治疗并转上级医院。',
+  },
+  {
+    label: '庭审证词录音 (speech_legal)',
+    category: 'audio',
+    description: '法庭庭审现场录音，被告律师陈述：根据《合同法》第52条，本合同因存在重大误解应当认定无效，请求法院予以撤销。',
+  },
+  {
+    label: '原创纯音乐 (music_original)',
+    category: 'audio',
+    description: '作曲家原创钢琴独奏曲，浪漫主义风格，主题旋律重复变奏，配以弦乐编配，完整曲目时长4分32秒，未发表首版录音。',
+  },
 ];
 
-// ★ v3 新增: 场景覆盖选项 (对应后端 scene_classifier 支持的所有场景)
+// ─── 场景覆盖选项（★ v4: 补充音频细粒度场景）───────────────────────────
 const SCENE_OVERRIDE_OPTIONS = [
-  { value: '',             label: '🤖 自动识别 (推荐)',   group: 'auto' },
+  { value: '',              label: '🤖 自动识别 (推荐)',    group: 'auto'  },
   // 文本场景
-  { value: 'medical_sft', label: '🏥 医疗 SFT  ×1.35',  group: 'text' },
-  { value: 'legal_doc',   label: '⚖️  法律文书  ×1.20',  group: 'text' },
-  { value: 'code_tech',   label: '💻 代码技术  ×1.10',  group: 'text' },
-  { value: 'creative',    label: '✍️  创意写作  ×0.90',  group: 'text' },
-  { value: 'chat_qa',     label: '💬 问答对话  ×0.80',  group: 'text' },
+  { value: 'medical_sft',  label: '🏥 医疗 SFT  ×1.35',   group: 'text'  },
+  { value: 'legal_doc',    label: '⚖️  法律文书  ×1.20',   group: 'text'  },
+  { value: 'code_tech',    label: '💻 代码技术  ×1.10',   group: 'text'  },
+  { value: 'creative',     label: '✍️  创意写作  ×0.90',   group: 'text'  },
+  { value: 'chat_qa',      label: '💬 问答对话  ×0.80',   group: 'text'  },
   // 图像场景
-  { value: 'illustration',label: '🎨 原创插画  ×1.50',  group: 'image' },
-  { value: 'photo',       label: '📷 摄影作品  ×1.00',  group: 'image' },
-  { value: 'diagram',     label: '📊 图表图解  ×0.55',  group: 'image' },
-  { value: 'screenshot',  label: '🖥️  截图素材  ×0.25',  group: 'image' },
+  { value: 'illustration', label: '🎨 原创插画  ×1.50',   group: 'image' },
+  { value: 'photo',        label: '📷 摄影作品  ×1.00',   group: 'image' },
+  { value: 'diagram',      label: '📊 图表图解  ×0.55',   group: 'image' },
+  { value: 'screenshot',   label: '🖥️  截图素材  ×0.25',   group: 'image' },
+  // ★ v4 音频细粒度场景
+  { value: 'speech_medical', label: '🏥 医疗语音  ×1.40', group: 'audio' },
+  { value: 'speech_legal',   label: '⚖️  法律语音  ×1.25', group: 'audio' },
+  { value: 'speech_edu',     label: '📚 教育语音  ×0.85', group: 'audio' },
+  { value: 'music_original', label: '🎵 原创音乐  ×1.10', group: 'audio' },
+  { value: 'ambient_sfx',    label: '🌿 环境音效  ×0.60', group: 'audio' },
+  { value: 'noise',          label: '🚫 噪声/废话  ×0.05', group: 'audio' },
 ];
 
+// ─── 波形可视化组件（仅在有 AudioContext 时渲染）──────────────────────
+const WaveformCanvas = ({ analyserRef, isRecording }) => {
+  const canvasRef = useRef(null);
+  const rafRef    = useRef(null);
+
+  useEffect(() => {
+    if (!isRecording || !analyserRef.current) return;
+    const analyser = analyserRef.current;
+    const buf = new Uint8Array(analyser.fftSize);
+    const draw = () => {
+      rafRef.current = requestAnimationFrame(draw);
+      analyser.getByteTimeDomainData(buf);
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.strokeStyle = '#34d399';
+      ctx.lineWidth   = 1.5;
+      ctx.beginPath();
+      const sliceW = canvas.width / buf.length;
+      let x = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const v = buf[i] / 128;
+        const y = (v * canvas.height) / 2;
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        x += sliceW;
+      }
+      ctx.stroke();
+    };
+    draw();
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [isRecording, analyserRef]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={360} height={48}
+      className="w-full h-12 rounded-lg bg-slate-950/80"
+    />
+  );
+};
+
+// ─── 主组件 ─────────────────────────────────────────────────────────
 const DataInputScreen = ({ onComplete }) => {
-  const [isProcessing, setIsProcessing]   = useState(false);
-  const [progress, setProgress]           = useState(0);
-  const [statusText, setStatusText]       = useState('');
-  const [enableZK, setEnableZK]           = useState(true);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [progress, setProgress]         = useState(0);
+  const [statusText, setStatusText]     = useState('');
+  const [enableZK, setEnableZK]         = useState(true);
   const [assetCategory, setAssetCategory] = useState('image');
-  const [inputText, setInputText]         = useState('');
+  const [inputText, setInputText]       = useState('');
   const [selectedImage, setSelectedImage] = useState(null);
-  const [activePreset, setActivePreset]   = useState(null);
-  // ★ v3 新增
-  const [sceneOverride, setSceneOverride] = useState('');   // '' = 自动
-  const [showDebug, setShowDebug]         = useState(false);
+  const [activePreset, setActivePreset] = useState(null);
+  const [sceneOverride, setSceneOverride] = useState('');
+  const [showDebug, setShowDebug]       = useState(false);
+
+  // ★ v4 音频状态
+  const [isRecording, setIsRecording]   = useState(false);
+  const [audioB64, setAudioB64]         = useState(null);       // base64 wav
+  const [audioDuration, setAudioDuration] = useState(0);        // 秒
+  const [audioFileName, setAudioFileName] = useState(null);     // 上传文件名
+  const [recSeconds, setRecSeconds]     = useState(0);          // 录音计时
+
+  const mediaRecorderRef = useRef(null);
+  const chunksRef        = useRef([]);
+  const analyserRef      = useRef(null);
+  const audioCtxRef      = useRef(null);
+  const timerRef         = useRef(null);
+  const fileInputRef     = useRef(null);
+
+  // ─ 清理录音资源
+  const stopRecording = useCallback(() => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
+    clearInterval(timerRef.current);
+    if (audioCtxRef.current) { audioCtxRef.current.close(); audioCtxRef.current = null; }
+    analyserRef.current = null;
+    setIsRecording(false);
+  }, []);
+
+  // 页面卸载时自动停录
+  useEffect(() => () => stopRecording(), [stopRecording]);
+
+  // ─ 开始录音
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Web Audio 分析器（供波形可视化用）
+      const ctx      = new AudioContext();
+      const source   = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      source.connect(analyser);
+      audioCtxRef.current  = ctx;
+      analyserRef.current  = analyser;
+
+      // MediaRecorder
+      const mr = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+      chunksRef.current = [];
+      mr.ondataavailable = (e) => e.data.size > 0 && chunksRef.current.push(e.data);
+      mr.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          const b64 = reader.result.split(',')[1];
+          setAudioB64(b64);
+          setAudioDuration(Math.round(blob.size / 8000)); // 粗略估算
+        };
+        reader.readAsDataURL(blob);
+        // 停止 stream 轨道
+        stream.getTracks().forEach((t) => t.stop());
+      };
+      mr.start();
+      mediaRecorderRef.current = mr;
+
+      // 计时
+      let secs = 0;
+      setRecSeconds(0);
+      timerRef.current = setInterval(() => { secs++; setRecSeconds(secs); }, 1000);
+      setIsRecording(true);
+      setAudioB64(null);
+      setAudioFileName(null);
+    } catch (err) {
+      alert('无法访问麦克风，请检查浏览器权限。');
+    }
+  };
+
+  // ─ 上传音频文件
+  const handleAudioFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setAudioB64(reader.result.split(',')[1]);
+      setAudioFileName(file.name);
+      setAudioDuration(0);
+    };
+    reader.readAsDataURL(file);
+    setAudioB64(null);
+  };
 
   const getDescriptionForBackend = () => {
     if (assetCategory === 'text') return inputText;
-    return inputText || '原创图像';
+    return inputText || (assetCategory === 'audio' ? '音频语料' : '原创图像');
   };
 
   const handlePreset = (preset) => {
     setActivePreset(preset.label);
     setAssetCategory(preset.category);
     setInputText(preset.description);
-    if (preset.category === 'image') setSelectedImage('preset_image.png');
-    else setSelectedImage(null);
-    // 切换预设时清除场景覆盖，让分类器自动识别
+    setSelectedImage(preset.category === 'image' ? 'preset_image.png' : null);
+    setAudioB64(null);
+    setAudioFileName(null);
+    setSceneOverride('');
+    if (isRecording) stopRecording();
+  };
+
+  // ─ 切换模态时清空状态
+  const switchCategory = (cat) => {
+    if (isRecording) stopRecording();
+    setAssetCategory(cat);
+    setInputText('');
+    setSelectedImage(null);
+    setAudioB64(null);
+    setAudioFileName(null);
+    setActivePreset(null);
     setSceneOverride('');
   };
 
@@ -78,12 +246,17 @@ const DataInputScreen = ({ onComplete }) => {
     const steps = [];
     const overrideNote = sceneOverride ? ` [强制场景: ${sceneOverride}]` : '';
     if (isZk) {
-      steps.push({ p: 10,  text: '【Stage 1 — 模态路由】初始化 WebAssembly 沙箱，识别模态类型...' });
-      steps.push({ p: 28,  text: `【Stage 2 — 场景分类】SceneClassifier v3 分析 ${category === 'image' ? '图像描述' : '文本领域'}，识别子场景...${overrideNote}` });
-      if (category === 'image') {
+      steps.push({ p: 10, text: '【Stage 1 — 模态路由】初始化 WebAssembly 沙箱，识别模态类型...' });
+      if (category === 'audio') {
+        steps.push({ p: 28, text: `【Stage 2 — 声场分类】SceneClassifier v4 双通道融合：声学(ZCR/HNR/chroma_var×0.65) + 文本关键词(×0.35)${overrideNote}` });
+        steps.push({ p: 45, text: '【Stage 3 — 音频特征】AudioAdapter: 频谱质心 + 谐波噪声比 + 节拍强度 + SNR 评估...' });
+        steps.push({ p: 62, text: '【Stage 3 — 细粒度标签】speech_medical / speech_legal / music_original / ambient_sfx 子场景匹配...' });
+      } else if (category === 'image') {
+        steps.push({ p: 28, text: `【Stage 2 — 场景分类】SceneClassifier v4 分析图像描述，识别子场景...${overrideNote}` });
         steps.push({ p: 45, text: '【Stage 3 — 特征提取】ImageAdapter: LAION-Aesthetics 美学评估 + DWT 隐写鲁棒性...' });
         steps.push({ p: 62, text: '【Stage 3 — 稀缺度】CLIP 512维特征对齐，计算画派风格稀缺度...' });
       } else {
+        steps.push({ p: 28, text: `【Stage 2 — 场景分类】SceneClassifier v4 分析文本领域，识别子场景...${overrideNote}` });
         steps.push({ p: 45, text: '【Stage 3 — 特征提取】TextAdapter: 场景专项 SNR + Shannon 熵 + 废话熔断检测...' });
         steps.push({ p: 62, text: '【Stage 3 — 图谱构建】GraphRAG 实体拓扑密度 + KNN-Shapley 边际贡献评估...' });
       }
@@ -99,8 +272,12 @@ const DataInputScreen = ({ onComplete }) => {
 
   const processData = () => {
     const desc = getDescriptionForBackend();
-    if (assetCategory === 'text' && !desc.trim()) return alert('请输入文本内容');
-    if (assetCategory === 'image' && !selectedImage) return alert('请上传画作或选择 Demo 预设');
+    if (assetCategory === 'text'  && !desc.trim())   return alert('请输入文本内容');
+    if (assetCategory === 'image' && !selectedImage)  return alert('请上传画作或选择 Demo 预设');
+    if (assetCategory === 'audio' && !desc.trim() && !audioB64)
+      return alert('请输入音频描述，或先录音/上传音频文件');
+
+    if (isRecording) stopRecording();
 
     setIsProcessing(true);
     setProgress(0);
@@ -114,15 +291,21 @@ const DataInputScreen = ({ onComplete }) => {
         cur++;
       } else {
         clearInterval(interval);
-        // ★ 第 4 个参数传递 sceneOverride (null 代表自动)
-        setTimeout(() => onComplete(desc, assetCategory, enableZK, sceneOverride || null), 1200);
+        // 第 5 参数传 audioB64（文本/图像为 null）
+        setTimeout(() => onComplete(desc, assetCategory, enableZK, sceneOverride || null, audioB64 || null), 1200);
       }
     }, 750);
   };
 
-  // 当前场景覆盖的显示标签
-  const overrideLabel = SCENE_OVERRIDE_OPTIONS.find(o => o.value === sceneOverride)?.label || '🤖 自动识别';
+  const overrideLabel    = SCENE_OVERRIDE_OPTIONS.find(o => o.value === sceneOverride)?.label || '🤖 自动识别';
   const isOverrideActive = Boolean(sceneOverride);
+
+  // 音频 preset 仅在音频标签下高亮
+  const presetColor = (preset) => {
+    if (preset.category === 'image') return 'text-amber-500';
+    if (preset.category === 'audio') return 'text-emerald-500';
+    return 'text-blue-500';
+  };
 
   return (
     <div className="min-h-screen relative flex items-center justify-center bg-slate-950 p-6 font-sans">
@@ -135,32 +318,38 @@ const DataInputScreen = ({ onComplete }) => {
             <Database className="w-7 h-7 text-emerald-400" />
             <h1 className="text-xl font-bold text-white">智数知权 · 多模态资产录入网关</h1>
           </div>
-          {/* ★ v3 版本标签 */}
+          {/* ★ v4 版本标签 */}
           <div className="flex items-center gap-2 text-xs text-slate-500 font-mono">
-            <Tag className="w-3.5 h-3.5 text-purple-400" />
-            <span className="text-purple-400 font-semibold">Scene Classifier</span>
-            <span className="px-1.5 py-0.5 rounded bg-purple-900/40 border border-purple-500/30 text-purple-300 text-[10px] font-bold tracking-wider">v3 · hybrid ML</span>
+            <Tag className="w-3.5 h-3.5 text-emerald-400" />
+            <span className="text-emerald-400 font-semibold">Scene Classifier</span>
+            <span className="px-1.5 py-0.5 rounded bg-emerald-900/40 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold tracking-wider">v4 · dual-channel fusion</span>
           </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
 
-          {/* LEFT: input area */}
+          {/* LEFT */}
           <div className="space-y-4">
 
-            {/* 模态切换 */}
-            <div className="flex space-x-2 bg-slate-950/50 p-1 rounded-xl border border-slate-800">
+            {/* ★ v4 模态切换：三标签 */}
+            <div className="flex space-x-1.5 bg-slate-950/50 p-1 rounded-xl border border-slate-800">
               <button
-                onClick={() => { setAssetCategory('image'); setInputText(''); setSelectedImage(null); }}
-                className={`flex-1 flex items-center justify-center py-2 text-sm font-bold rounded-lg transition-all ${assetCategory === 'image' ? 'bg-slate-800 text-amber-400 shadow-sm' : 'text-slate-500 hover:text-slate-300'}`}
+                onClick={() => switchCategory('image')}
+                className={`flex-1 flex items-center justify-center py-2 text-xs font-bold rounded-lg transition-all ${assetCategory === 'image' ? 'bg-slate-800 text-amber-400 shadow-sm' : 'text-slate-500 hover:text-slate-300'}`}
               >
-                <ImageIcon className="w-4 h-4 mr-2" /> 原创画作资产
+                <ImageIcon className="w-3.5 h-3.5 mr-1.5" /> 原创画作
               </button>
               <button
-                onClick={() => { setAssetCategory('text'); setSelectedImage(null); setInputText(''); }}
-                className={`flex-1 flex items-center justify-center py-2 text-sm font-bold rounded-lg transition-all ${assetCategory === 'text' ? 'bg-slate-800 text-blue-400 shadow-sm' : 'text-slate-500 hover:text-slate-300'}`}
+                onClick={() => switchCategory('text')}
+                className={`flex-1 flex items-center justify-center py-2 text-xs font-bold rounded-lg transition-all ${assetCategory === 'text' ? 'bg-slate-800 text-blue-400 shadow-sm' : 'text-slate-500 hover:text-slate-300'}`}
               >
-                <FileText className="w-4 h-4 mr-2" /> 文本垂直语料
+                <FileText className="w-3.5 h-3.5 mr-1.5" /> 文本语料
+              </button>
+              <button
+                onClick={() => switchCategory('audio')}
+                className={`flex-1 flex items-center justify-center py-2 text-xs font-bold rounded-lg transition-all ${assetCategory === 'audio' ? 'bg-slate-800 text-emerald-400 shadow-sm' : 'text-slate-500 hover:text-slate-300'}`}
+              >
+                <Mic className="w-3.5 h-3.5 mr-1.5" /> 音频语料
               </button>
             </div>
 
@@ -181,30 +370,27 @@ const DataInputScreen = ({ onComplete }) => {
               </div>
             </div>
 
-            {/* 文本模式: 直接输入 */}
+            {/* 文本输入区 */}
             {assetCategory === 'text' && (
               <textarea
                 value={inputText}
                 onChange={(e) => setInputText(e.target.value)}
-                placeholder={"输入需要确权的语料 (医疗 / 法律 / 代码 / 创意写作 / 问答对话)...\nScene Classifier v3 将自动识别领域场景并调整定价权重。"}
+                placeholder={"输入需要确权的语料 (医疗 / 法律 / 代码 / 创意写作 / 问答对话)...\nScene Classifier v4 将自动识别领域场景并调整定价权重。"}
                 className="w-full h-36 bg-slate-950/50 border border-slate-700 rounded-xl p-4 font-mono text-sm text-blue-400 placeholder-slate-600 focus:outline-none focus:border-blue-500 resize-none"
               />
             )}
 
-            {/* 图像模式: 上传区 + 描述输入 */}
+            {/* 图像输入区 */}
             {assetCategory === 'image' && (
               <div className="space-y-3">
                 <div
                   onClick={() => setSelectedImage('user_artwork.png')}
                   className={`w-full h-24 bg-slate-950/50 border-2 border-dashed rounded-xl flex flex-col items-center justify-center cursor-pointer transition-colors ${selectedImage ? 'border-amber-500 bg-amber-900/10' : 'border-slate-700 hover:border-slate-500'}`}
                 >
-                  {selectedImage ? (
-                    <><ShieldCheck className="w-6 h-6 text-amber-400 mb-1" /><p className="text-xs text-amber-400 font-bold">画作已加载入沙箱</p></>
-                  ) : (
-                    <><UploadCloud className="w-6 h-6 text-slate-500 mb-1" /><p className="text-xs text-slate-300 font-bold">点击上传商业插画原稿</p></>
-                  )}
+                  {selectedImage
+                    ? <><ShieldCheck className="w-6 h-6 text-amber-400 mb-1" /><p className="text-xs text-amber-400 font-bold">画作已加载入沙箱</p></>
+                    : <><UploadCloud className="w-6 h-6 text-slate-500 mb-1" /><p className="text-xs text-slate-300 font-bold">点击上传商业插画原稿</p></>}
                 </div>
-                {/* 画作描述输入 */}
                 <div>
                   <p className="text-[10px] text-slate-500 mb-1.5 flex items-center gap-1">
                     <Tag className="w-3 h-3" />
@@ -220,7 +406,87 @@ const DataInputScreen = ({ onComplete }) => {
               </div>
             )}
 
-            {/* ★ v3 新增: 调试面板 — 场景覆盖 */}
+            {/* ★ v4 音频输入区 */}
+            {assetCategory === 'audio' && (
+              <div className="space-y-3">
+                {/* 波形 / 状态区 */}
+                <div className="bg-slate-950/70 border border-slate-800 rounded-xl p-3 space-y-2">
+                  <div className="flex items-center justify-between text-[10px] font-mono">
+                    <span className={isRecording ? 'text-red-400 flex items-center gap-1' : 'text-slate-500'}>
+                      {isRecording && <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse inline-block" />}
+                      {isRecording ? `录音中 ${recSeconds}s` : audioB64 ? '音频就绪' : '等待音频输入'}
+                    </span>
+                    {audioFileName && <span className="text-slate-400 truncate max-w-[140px]">{audioFileName}</span>}
+                    {audioB64 && !audioFileName && <span className="text-emerald-400">✓ 波形已捕获</span>}
+                  </div>
+
+                  {/* 波形画布 */}
+                  <WaveformCanvas analyserRef={analyserRef} isRecording={isRecording} />
+
+                  {/* 未录音时的静态占位 */}
+                  {!isRecording && !audioB64 && (
+                    <div className="text-center text-[10px] text-slate-600 -mt-1 pb-1">
+                      声学特征将由后端 AudioAdapter 提取 (ZCR / HNR / chroma_var / beat)
+                    </div>
+                  )}
+                </div>
+
+                {/* 录音 / 上传 按钮行 */}
+                <div className="flex gap-2">
+                  {!isRecording ? (
+                    <button
+                      onClick={startRecording}
+                      className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs font-bold bg-emerald-900/30 border border-emerald-500/40 text-emerald-400 hover:bg-emerald-900/50 transition-colors"
+                    >
+                      <Mic className="w-4 h-4" /> 开始录音
+                    </button>
+                  ) : (
+                    <button
+                      onClick={stopRecording}
+                      className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs font-bold bg-red-900/30 border border-red-500/40 text-red-400 hover:bg-red-900/50 transition-colors"
+                    >
+                      <StopCircle className="w-4 h-4" /> 停止录音
+                    </button>
+                  )}
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-xs font-bold bg-slate-800/60 border border-slate-700 text-slate-400 hover:text-slate-300 transition-colors"
+                  >
+                    <UploadCloud className="w-4 h-4" /> 上传音频
+                  </button>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="audio/*"
+                    className="hidden"
+                    onChange={handleAudioFile}
+                  />
+                </div>
+
+                {/* 音频描述文本 */}
+                <div>
+                  <p className="text-[10px] text-slate-500 mb-1.5 flex items-center gap-1">
+                    <Tag className="w-3 h-3" />
+                    描述音频内容/场景 <span className="text-emerald-400">(文本通道 ×0.35，辅助细粒度场景分类)</span>
+                  </p>
+                  <textarea
+                    value={inputText}
+                    onChange={(e) => setInputText(e.target.value)}
+                    placeholder={"例: 医院临床访谈录音，医生诊断陈述，包含专业术语...\n或: 庭审证词录音 / 原创钢琴曲 / 环境音效包..."}
+                    className="w-full h-20 bg-slate-950/50 border border-slate-700 rounded-xl p-3 font-mono text-xs text-emerald-400 placeholder-slate-600 focus:outline-none focus:border-emerald-500 resize-none"
+                  />
+                </div>
+
+                {/* 双通道说明 */}
+                <div className="text-[10px] text-slate-600 bg-slate-950/50 rounded-lg px-3 py-2 border border-slate-800/60 font-mono leading-relaxed">
+                  <span className="text-emerald-700">●</span> 声学通道 ×0.65：ZCR / HNR / chroma_var / beat_str → 语音/音乐/噪声<br/>
+                  <span className="text-blue-700">●</span> 文本通道 ×0.35：关键词密度 → 医疗/法律/教育子类细分<br/>
+                  <span className="text-slate-600">  method = fusion | acoustic | text_proxy</span>
+                </div>
+              </div>
+            )}
+
+            {/* 调试 · 场景覆盖 */}
             <div className="rounded-xl border border-slate-800 overflow-hidden">
               <button
                 onClick={() => setShowDebug(!showDebug)}
@@ -241,22 +507,34 @@ const DataInputScreen = ({ onComplete }) => {
               {showDebug && (
                 <div className="p-3 bg-slate-950/70 border-t border-slate-800 space-y-2">
                   <p className="text-[10px] text-slate-500">
-                    强制指定场景类型，绕过 SceneClassifier 自动识别。用于测试不同场景定价路径、复现边界案例。
+                    强制指定场景类型，绕过 SceneClassifier v4 双通道推理。用于测试音频细粒度定价路径。
                   </p>
                   <select
                     value={sceneOverride}
                     onChange={(e) => setSceneOverride(e.target.value)}
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs font-mono text-slate-300 focus:outline-none focus:border-purple-500"
                   >
-                    {SCENE_OVERRIDE_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    ))}
+                    {/* 按 group 分组展示 */}
+                    <optgroup label="── 自动 ──">
+                      {SCENE_OVERRIDE_OPTIONS.filter(o => o.group === 'auto').map(o =>
+                        <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </optgroup>
+                    <optgroup label="── 文本场景 ──">
+                      {SCENE_OVERRIDE_OPTIONS.filter(o => o.group === 'text').map(o =>
+                        <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </optgroup>
+                    <optgroup label="── 图像场景 ──">
+                      {SCENE_OVERRIDE_OPTIONS.filter(o => o.group === 'image').map(o =>
+                        <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </optgroup>
+                    <optgroup label="── 音频细粒度场景 (v4 新增) ──">
+                      {SCENE_OVERRIDE_OPTIONS.filter(o => o.group === 'audio').map(o =>
+                        <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </optgroup>
                   </select>
                   {isOverrideActive && (
                     <p className="text-[10px] text-amber-400 flex items-center gap-1">
-                      ⚠ 场景覆盖已激活，将跳过 SceneClassifier v3 的 hybrid ML 推理
+                      ⚠ 场景覆盖已激活，将跳过 SceneClassifier v4 的 dual-channel fusion 推理
                     </p>
                   )}
                 </div>
@@ -266,7 +544,13 @@ const DataInputScreen = ({ onComplete }) => {
             <button
               onClick={processData}
               disabled={isProcessing}
-              className={`w-full py-3.5 font-black rounded-xl transition-all shadow-lg text-white text-sm ${enableZK ? 'bg-gradient-to-r from-purple-600 to-indigo-500 hover:from-purple-700 hover:to-indigo-600' : 'bg-slate-700 hover:bg-slate-600'} ${isProcessing ? 'opacity-60 cursor-not-allowed' : ''}`}
+              className={`w-full py-3.5 font-black rounded-xl transition-all shadow-lg text-white text-sm
+                ${assetCategory === 'audio'
+                  ? 'bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-700 hover:to-teal-600'
+                  : enableZK
+                    ? 'bg-gradient-to-r from-purple-600 to-indigo-500 hover:from-purple-700 hover:to-indigo-600'
+                    : 'bg-slate-700 hover:bg-slate-600'}
+                ${isProcessing ? 'opacity-60 cursor-not-allowed' : ''}`}
             >
               {isProcessing ? '底层适配器执行中...' : '启动多模态质量甄别引擎'}
             </button>
@@ -274,7 +558,6 @@ const DataInputScreen = ({ onComplete }) => {
 
           {/* RIGHT: Demo presets + log */}
           <div className="space-y-4">
-            {/* Demo 预设区 */}
             <div>
               <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-1.5">
                 <PlayCircle className="w-3 h-3" /> 快速 Demo 预设
@@ -291,7 +574,7 @@ const DataInputScreen = ({ onComplete }) => {
                     }`}
                   >
                     <span className="font-bold">{preset.label}</span>
-                    <span className={`ml-2 text-[10px] ${preset.category === 'image' ? 'text-amber-500' : 'text-blue-500'}`}>
+                    <span className={`ml-2 text-[10px] ${presetColor(preset)}`}>
                       [{preset.category}]
                     </span>
                   </button>

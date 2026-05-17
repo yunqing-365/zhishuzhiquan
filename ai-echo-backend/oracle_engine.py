@@ -202,6 +202,13 @@ async def valuate(asset: AssetData):
     audio_scene = None   # 非音频模态保持 null
 
     if asset.scene_override:
+        # ★ v5: override 时如果是音频细粒度场景，回填 audio_scene（否则 AMM 找不到正确 alpha）
+        _override_is_audio_scene = asset.scene_override in {
+            "speech_medical", "speech_legal", "speech_edu",
+            "music_original", "ambient_sfx", "noise",
+        }
+        if _override_is_audio_scene and audio_scene is None:
+            audio_scene = asset.scene_override
         sr = SceneResult(
             scene             = asset.scene_override,
             confidence        = 1.0,
@@ -253,7 +260,14 @@ async def valuate(asset: AssetData):
     # Shapley 置信度（若 features 中含私有键则取，否则默认 0.5）
     shapley_conf = float(features.get("_shapley_confidence", 0.5))
 
-    dyn_price, demand, amm_alpha = calculate_bonding_price(base_val, sr.scene, shapley_conf)
+    # ★ v5 修复: 音频模态优先用 audio_scene 的 AMM alpha（speech_medical=38）
+    # 而非 TEV 场景 sr.scene（medical_sft=32），两者不同
+    effective_amm_scene = (
+        audio_scene
+        if (audio_scene and asset.asset_category == 'audio')
+        else sr.scene
+    )
+    dyn_price, demand, amm_alpha = calculate_bonding_price(base_val, effective_amm_scene, shapley_conf)
     opts              = real_options_pricing(base_val, features["scarcity"], features["shapley"], shapley_conf)
     creator_ratio     = round(72.0 + (features["shapley"] / 100) * 18.0, 1) if base_val > 0 else 0
 

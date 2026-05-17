@@ -38,11 +38,21 @@ const AUDIO_SCENE_AMM = {
   noise:          { alpha:  0, domainName: 'Noise (无效音频，拒绝入库)',   b2bCaller: 'N/A',               icon: '🚫' },
 };
 
-// 模态 paywall 拦截描述
-const PAYWALL_LOG = {
-  text:  (caller) => `>> [AI Paywall] ⚠️ 拦截成功！检测到 ${caller} 未授权 RAG 抓取 (Hash: 0xSimHash...)`,
-  image: (caller) => `>> [AI Paywall] ⚠️ 拦截成功！检测到 ${caller} 未授权"融图"训练 (Hash: 0xDCT_pHash...)`,
-  audio: (caller) => `>> [AI Paywall] ⚠️ 拦截成功！检测到 ${caller} 未授权音频转录抓取 (Hash: 0xAFP_acoustic...)`,
+// ★ v5: Paywall 拦截日志生成器 — 接入真实 asset_hash 和 hashAlgo
+// 格式与合约 PaywallTriggered 事件的 fingerprintType 字段完全对齐
+const buildPaywallLog = (caller, modality, assetHash) => {
+  // 根据模态选取合约对应的指纹算法标记（与 HashAlgorithm enum 对齐）
+  const fpMeta = {
+    text:  { algo: 'SimHash-64bit',    prefix: '0xSH_',  contract: 'HashAlgorithm.SIMHASH' },
+    image: { algo: 'DCT-pHash-64bit',  prefix: '0xPH_',  contract: 'HashAlgorithm.PHASH'   },
+    audio: { algo: 'AFP-SHA256-48bit', prefix: '0xAFP_', contract: 'HashAlgorithm.AFP'      },
+  };
+  const { algo, prefix, contract } = fpMeta[modality] || fpMeta.text;
+  // 从 asset_hash 截取后8位作为指纹摘要展示，与合约 _fingerprintTypeStr() 输出对齐
+  const hashSnippet = assetHash
+    ? prefix + String(assetHash).slice(-8).toUpperCase().padStart(8, '0')
+    : prefix + 'XXXXXXXX';
+  return `>> [AI Paywall · verifyAccess()] ⚠️ 拦截成功！检测到 ${caller} 未授权访问\n   ↳ 资产指纹: ${hashSnippet}  算法: ${algo}\n   ↳ 合约校验: ${contract}  结果: ACCESS_DENIED — 无有效 AccessToken\n   ↳ 触发事件: PaywallTriggered(assetHash, unauthorizedCaller, "${modality}", "${algo}")`;
 };
 
 // ── 从 valuationResult 解析 AMM 参数 ──────────────────────────────────
@@ -78,7 +88,7 @@ const resolveAmmConfig = (valuationResult, assetCategory) => {
 };
 
 // ── SmartSplitScreen（v4：完全由 valuationResult 驱动，消灭 hardcode）─
-const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart }) => {
+const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, onBack }) => {
   // ── 从 oracle 结果提取真实定价参数 ────────────────────────────────
   const fv           = valuationResult?.final_valuation;
   const baseValue    = fv?.base_value    ?? (assetCategory === 'audio' ? 18600 : assetCategory === 'image' ? 9250 : 1200);
@@ -108,18 +118,24 @@ const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart }
   const handleSimulatePayment = () => {
     setTxStatus('processing');
     setLogs([]);
-    const paywallFn = PAYWALL_LOG[assetCategory] || PAYWALL_LOG['text'];
+    // ★ v5: 接入真实 asset_hash 和 modality，生成与合约 PaywallTriggered 事件对齐的拦截日志
+    const assetHash = valuationResult?.asset_hash ?? valuationResult?.final_valuation?.asset_hash ?? null;
+    const paywallLog = buildPaywallLog(b2bCaller, assetCategory, assetHash);
+    const hashSnippet = assetHash ? String(assetHash).slice(-8).toUpperCase().padStart(8, '0') : '????????';
     setTimeout(() => addLog(`>> [B端大厂节点] ${b2bCaller} ${icon} 正在检索目标数据集...`), 500);
-    setTimeout(() => addLog(paywallFn(b2bCaller)), 1500);
-    setTimeout(() => addLog(`>> [智能合约] ${b2bCaller} 调用 purchaseAndCallData()，支付 Token 当量，AI-Echo 释放授权凭证...`), 2800);
+    setTimeout(() => addLog(paywallLog), 1500);
+    setTimeout(() => addLog(`>> [链上合约] ${b2bCaller} 调用 purchaseAndCallData(hash=0x${hashSnippet}, quota=100, ttl=30d)
+   ↳ AMM 实时报价验证通过，颁发 AccessToken，触发 AccessGranted 事件...`), 2800);
     setTimeout(() => {
       const newDemand = demand + 1;
       const newPrice  = calculatePrice(newDemand);
       setDemand(newDemand);
       setCurrentPrice(newPrice);
-      addLog(`>> [AMM 联合曲线] ${domainName} 领域热度上升，调用费自动上调至 ${newPrice.toLocaleString()} CRD 📈`);
+      addLog(`>> [AMM 联合曲线] ${domainName} 领域热度上升 (demand+1)，调用费自动上调至 ${newPrice.toLocaleString()} CRD 📈
+   ↳ domainDemandLedger 已更新: demand=${newDemand}`);
     }, 4500);
-    setTimeout(() => addLog(`>> [结算网关] 去中心化跨链分账 (创作者: ${creatorRatio}% | 平台: ${((100 - creatorRatio) * 0.6).toFixed(1)}% | 社区: ${((100 - creatorRatio) * 0.4).toFixed(1)}%)...`), 5500);
+    setTimeout(() => addLog(`>> [结算网关] 去中心化跨链分账 (创作者: ${creatorRatio}% | 平台: ${((100 - creatorRatio) * 0.6).toFixed(1)}% | 社区: ${((100 - creatorRatio) * 0.4).toFixed(1)}%)
+   ↳ PaymentSettled 事件已上链，合规流水可查`), 5500);
     setTimeout(() => {
       addLog('>> [SUCCESS] 创作者已获得本次大模型训练调用分润，合规流水上链完成 ✅');
       setTxStatus('success');
@@ -156,9 +172,16 @@ const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart }
               {assetCategory === 'audio' && <><Mic className="w-3 h-3 ml-2 text-emerald-400" /><span className="ml-1 text-emerald-400">Audio Mode</span></>}
             </p>
           </div>
-          <button onClick={onRestart} className="text-sm text-slate-400 hover:text-purple-400 transition-colors border border-slate-700 hover:border-purple-500/50 px-5 py-2 rounded-xl bg-slate-800/50 shadow-sm">
-            重置沙箱 Demo
-          </button>
+          <div className="flex items-center gap-2">
+            {onBack && (
+              <button onClick={onBack} className="text-sm text-slate-500 hover:text-slate-300 transition-colors border border-slate-800 hover:border-slate-600 px-4 py-2 rounded-xl bg-slate-900/50 shadow-sm">
+                ← 返回估值
+              </button>
+            )}
+            <button onClick={onRestart} className="text-sm text-slate-400 hover:text-purple-400 transition-colors border border-slate-700 hover:border-purple-500/50 px-5 py-2 rounded-xl bg-slate-800/50 shadow-sm">
+              重置沙箱 Demo
+            </button>
+          </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 relative z-10">

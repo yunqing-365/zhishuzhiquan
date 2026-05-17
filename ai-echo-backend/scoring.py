@@ -58,10 +58,16 @@ AMM_SCENE_CONFIG: dict = {
     "photo":        {"demand":  6, "alpha": 14},  # 视觉基础集，存量大
     "diagram":      {"demand":  5, "alpha": 10},  # 科学图表，小众
     "screenshot":   {"demand":  2, "alpha":  6},  # UI训练集，低价值
-    # ── 音频场景 ────────────────────────────────────────────────────
-    "general":      {"demand":  5, "alpha": 25},  # 多模态音频基础集
-    # noise 不上市场
-    "noise":        {"demand":  0, "alpha":  0},
+    # ── 音频细粒度场景 (★ v4 新增：与 scene_classifier.AUDIO_SCENE_WEIGHTS 对齐) ──
+    # audio_scene 由 SceneClassifier.classify_audio() 双通道融合输出
+    "speech_medical": {"demand": 28, "alpha": 38},  # 临床语音转录，极稀缺
+    "speech_legal":   {"demand": 22, "alpha": 32},  # 庭审语音，司法结构化
+    "speech_edu":     {"demand": 15, "alpha": 20},  # 教育TTS语料，中等需求
+    "music_original": {"demand": 18, "alpha": 22},  # 原创音乐生成训练集
+    "ambient_sfx":    {"demand":  8, "alpha": 14},  # 游戏音效/环境音
+    "general":        {"demand":  5, "alpha": 25},  # 多模态音频基础集（兜底）
+    # noise 不上市场，alpha=0 触发熔断
+    "noise":          {"demand":  0, "alpha":  0},
 }
 
 # 向后兼容: 其他模块仍可 from scoring import DOMAIN_DEMAND
