@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   UploadCloud, Cpu, Database, PlayCircle, ShieldCheck, Lock,
   Image as ImageIcon, FileText, Tag, ChevronDown, ChevronUp,
-  FlaskConical, Mic, StopCircle, Waveform,
+  FlaskConical, Mic, StopCircle, Waveform, Film, History,
 } from 'lucide-react';
 
 // ─── Demo 预设（★ v4: 补充音频场景）────────────────────────────────────
@@ -71,6 +71,12 @@ const SCENE_OVERRIDE_OPTIONS = [
   { value: 'music_original', label: '🎵 原创音乐  ×1.10', group: 'audio' },
   { value: 'ambient_sfx',    label: '🌿 环境音效  ×0.60', group: 'audio' },
   { value: 'noise',          label: '🚫 噪声/废话  ×0.05', group: 'audio' },
+
+  // ── 视频场景 (Stage A 降级，真实帧采样接入后子场景细化) ──
+  { value: 'illustration', label: '🎬 影视创作  ×8.0',  group: 'video' },
+  { value: 'photo',        label: '📹 纪录/访谈  ×6.0',  group: 'video' },
+  { value: 'diagram',      label: '🎓 教学讲解  ×5.5',  group: 'video' },
+  { value: 'screenshot',   label: '📱 日常记录  ×3.0',  group: 'video' },
 ];
 
 // ─── 波形可视化组件（仅在有 AudioContext 时渲染）──────────────────────
@@ -116,7 +122,7 @@ const WaveformCanvas = ({ analyserRef, isRecording }) => {
 };
 
 // ─── 主组件 ─────────────────────────────────────────────────────────
-const DataInputScreen = ({ onComplete }) => {
+const DataInputScreen = ({ onComplete, onHistory }) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress]         = useState(0);
   const [statusText, setStatusText]     = useState('');
@@ -320,6 +326,16 @@ const DataInputScreen = ({ onComplete }) => {
           </div>
           {/* ★ v4 版本标签 */}
           <div className="flex items-center gap-2 text-xs text-slate-500 font-mono">
+            {onHistory && (
+              <button
+                onClick={onHistory}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-700 text-slate-400 hover:text-violet-400 hover:border-violet-500/50 hover:bg-violet-900/10 transition-all mr-2"
+                title="查看估值历史"
+              >
+                <History className="w-3.5 h-3.5" />
+                <span className="text-xs font-mono">历史</span>
+              </button>
+            )}
             <Tag className="w-3.5 h-3.5 text-emerald-400" />
             <span className="text-emerald-400 font-semibold">Scene Classifier</span>
             <span className="px-1.5 py-0.5 rounded bg-emerald-900/40 border border-emerald-500/30 text-emerald-300 text-[10px] font-bold tracking-wider">v4 · dual-channel fusion</span>
@@ -350,6 +366,12 @@ const DataInputScreen = ({ onComplete }) => {
                 className={`flex-1 flex items-center justify-center py-2 text-xs font-bold rounded-lg transition-all ${assetCategory === 'audio' ? 'bg-slate-800 text-emerald-400 shadow-sm' : 'text-slate-500 hover:text-slate-300'}`}
               >
                 <Mic className="w-3.5 h-3.5 mr-1.5" /> 音频语料
+              </button>
+              <button
+                onClick={() => switchCategory('video')}
+                className={`flex-1 flex items-center justify-center py-2 text-xs font-bold rounded-lg transition-all ${assetCategory === 'video' ? 'bg-slate-800 text-violet-400 shadow-sm' : 'text-slate-500 hover:text-slate-300'}`}
+              >
+                <Film className="w-3.5 h-3.5 mr-1.5" /> 视频影像
               </button>
             </div>
 

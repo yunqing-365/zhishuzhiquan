@@ -38,7 +38,18 @@ import hashlib
 from dataclasses import dataclass
 from typing import Optional, Dict, Callable, Any
 
-os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+# ── 加载 .env 配置（项目根目录或后端目录均可）─────────────────────
+try:
+    from dotenv import load_dotenv
+    # 优先加载项目根目录的 .env，其次是后端目录
+    _root = os.path.dirname(os.path.dirname(__file__))
+    load_dotenv(os.path.join(_root, '.env'), override=False)
+    load_dotenv(os.path.join(os.path.dirname(__file__), '.env'), override=False)
+except ImportError:
+    pass  # python-dotenv 未安装时静默跳过
+
+# HF 镜像（从 .env 读取，fallback 到 hf-mirror.com）
+os.environ.setdefault('HF_ENDPOINT', 'https://hf-mirror.com')
 sys.path.insert(0, os.path.dirname(__file__))
 
 import numpy as np
@@ -58,18 +69,31 @@ from scoring import (
     real_options_pricing,
     knn_shapley_score,
 )
-from adapters import TextAdapter, ImageAdapter, AudioAdapter, classify_audio_scene
+from adapters import TextAdapter, ImageAdapter, AudioAdapter, VideoAdapter, classify_audio_scene
 from adapters.audio_adapter import _decode_audio_b64
 
 
 # ── 共享底层 ──────────────────────────────────────────────────────────
-print(">> 初始化向量知识库...")
-_chroma   = chromadb.Client()
+# ── SQLite 历史持久化 ────────────────────────────────────────────────
+from storage import init_db, save_valuation, get_history, get_stats, get_valuation_by_id, CHROMA_PATH
+
+print(">> 初始化数据库...")
+init_db()
+
+# ── ChromaDB 持久化客户端（重启不丢数据）────────────────────────────
+print(f">> 初始化向量知识库 (持久化: {CHROMA_PATH})...")
+os.makedirs(CHROMA_PATH, exist_ok=True)
+try:
+    _chroma = chromadb.PersistentClient(path=CHROMA_PATH)
+except Exception as _e:
+    print(f"!! PersistentClient 失败，降级为内存客户端: {_e}")
+    _chroma = chromadb.Client()
+
 _embed_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
     model_name="all-MiniLM-L6-v2"
 )
 _collection = _chroma.get_or_create_collection(
-    name="global_corpus_v4", embedding_function=_embed_fn
+    name="global_corpus_v5", embedding_function=_embed_fn
 )
 
 def _get_corpus() -> list:
@@ -79,11 +103,54 @@ def _get_corpus() -> list:
     except Exception:
         return []
 
+def _get_real_vector_distance(query_emb: list, asset_hash: str) -> float:
+    """
+    真实向量距离：用 ChromaDB 余弦距离衡量资产在知识库中的稀缺度。
+    距离越大 → 库中没有相似内容 → 稀缺度越高 → 估值越高。
+
+    ChromaDB 余弦距离范围 [0, 2]:
+      0 = 完全相同，2 = 完全相反
+    归一化到 [0.1, 0.98]，0.98 表示极度稀缺。
+    """
+    try:
+        count = _collection.count()
+        if count == 0:
+            return 0.88  # 空库：第一个资产，极度稀缺
+        n_results = min(5, count)
+        results = _collection.query(
+            query_embeddings=[query_emb],
+            n_results=n_results,
+            include=["distances"],
+        )
+        distances = results["distances"][0]
+        # ChromaDB cosine distance: avg of top-k neighbors
+        avg_dist = sum(distances) / len(distances)
+        # 归一化: cosine distance ∈ [0,2] → scarcity ∈ [0.05, 0.98]
+        normalized = max(0.05, min(0.98, avg_dist / 2.0))
+        return round(normalized, 4)
+    except Exception as _e:
+        print(f"!! [vector_distance] ChromaDB 查询失败，使用默认值: {_e}")
+        return 0.75  # 降级：中等稀缺
+
+def _add_to_corpus(asset_hash: str, embedding: list, metadata: dict) -> bool:
+    """把已估值资产的 embedding 存入 ChromaDB，让 KNN-Shapley 越来越准确"""
+    try:
+        _collection.upsert(
+            ids=[asset_hash],
+            embeddings=[embedding],
+            metadatas=[{k: str(v) for k, v in metadata.items() if v is not None}],
+        )
+        return True
+    except Exception as _e:
+        print(f"!! [corpus] embedding 存入失败 (不影响估值): {_e}")
+        return False
+
 
 # ── 适配器实例 ────────────────────────────────────────────────────────
 _text_adapter  = TextAdapter(embed_fn=_embed_fn,  get_corpus_fn=_get_corpus)
 _image_adapter = ImageAdapter(embed_fn=_embed_fn, get_corpus_fn=_get_corpus)
 _audio_adapter = AudioAdapter(embed_fn=_embed_fn, get_corpus_fn=_get_corpus)
+_video_adapter = VideoAdapter(embed_fn=_embed_fn, get_corpus_fn=_get_corpus)
 
 
 # ── 模态 TEV 权重（token equivalent value 倍率）────────────────────────
@@ -131,6 +198,11 @@ def _audio_classify(asset) -> tuple[SceneResult, Optional[str]]:
     return result, result.audio_scene
 
 
+def _video_classify(asset) -> tuple:
+    """视频模态：Stage A 降级使用图像场景分类器（描述文字）"""
+    return _clf.classify_image(asset.description), None
+
+
 def _build_registry(clf: SceneClassifier) -> Dict[str, ModalityConfig]:
     return {
         "text": ModalityConfig(
@@ -157,13 +229,31 @@ def _build_registry(clf: SceneClassifier) -> Dict[str, ModalityConfig]:
             extra_fn        = lambda a: {"audio_data": a.audio_data},
             adapter_version = "v1",
         ),
+        "video": ModalityConfig(
+            adapter         = _video_adapter,
+            label           = "视频影像",
+            tev             = MODALITY_TEV["video"],
+            classify_fn     = _video_classify,
+            extra_fn        = lambda a: {},
+            adapter_version = "v0-stub",
+        ),
     }
 
 
 # ── FastAPI ───────────────────────────────────────────────────────────
 app = FastAPI(title="AI-Echo Multi-modal Oracle v4")
+# CORS 配置：开发允许所有来源，生产从环境变量读取
+_raw_origins = os.environ.get("ALLOWED_ORIGINS", "")
+_allowed_origins = (
+    [o.strip() for o in _raw_origins.split(",") if o.strip()]
+    if _raw_origins
+    else ["*"]  # 未配置时开发模式允许所有（上线前必须改）
+)
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    CORSMiddleware,
+    allow_origins=_allowed_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 _clf      = SceneClassifier()
@@ -237,9 +327,9 @@ async def valuate(asset: AssetData):
         }
 
     # ── Stage 3: 特征提取 ─────────────────────────────────────────────
-    seed = int(hashlib.md5(asset.description.encode()).hexdigest(), 16) % 2**31
-    np.random.seed(seed)
-    vector_distance = float(np.random.uniform(0.55, 0.96))
+    # 真实向量距离：ChromaDB 余弦距离（替换原来的 random，稀缺度现在是真实指标）
+    asset_hash_val = adapter.generate_hash(asset.description, **extra)
+    vector_distance = _get_real_vector_distance(query_emb, asset_hash_val)
 
     features = adapter.extract_metrics(
         asset.description, sr, vector_distance, query_emb, **extra
@@ -278,9 +368,9 @@ async def valuate(asset: AssetData):
         for name, key in zip(adapter.get_metric_names(), metric_keys)
     ]
 
-    return {
+    _response = {
         "status":     "success" if base_val > 0 else "rejected",
-        "asset_hash": adapter.generate_hash(asset.description, **extra),
+        "asset_hash": asset_hash_val,
 
         # ── 场景分类（含 method 和 audio_scene，v3 漏掉了）────────────
         "scene_classification": {
@@ -315,8 +405,27 @@ async def valuate(asset: AssetData):
             "adapter_version":  cfg.adapter_version,
             "scene_override":   asset.scene_override,
             "shapley_confidence": round(shapley_conf, 3),
+            "vector_distance":  vector_distance,   # ★ v5: 真实稀缺度（非随机）
+            "corpus_size":      _collection.count(),
         },
     }
+
+    # ── 估值后处理：存入 ChromaDB + SQLite（两者失败均不影响响应）────
+    if _response["status"] == "success":
+        # 存入向量知识库（让 KNN-Shapley 越来越精确）
+        _add_to_corpus(
+            asset_hash   = asset_hash_val,
+            embedding    = query_emb,
+            metadata     = {
+                "modality": asset.asset_category,
+                "scene":    sr.scene,
+                "audio_scene": audio_scene or "",
+            },
+        )
+        # 存入 SQLite 历史记录
+        save_valuation(_response, asset.description, vector_distance)
+
+    return _response
 
 
 # ── 辅助端点 ─────────────────────────────────────────────────────────
@@ -342,13 +451,44 @@ async def list_scenes():
 
 @app.get("/api/health")
 async def health():
+    """健康检查 + 运行时统计"""
+    stats = get_stats()
+    stub_adapters = [k for k, v in _registry.items() if getattr(v.adapter, "IS_STUB", False)]
     return {
-        "status":  "ok",
-        "version": "v4",
-        "adapters": list(_registry.keys()),
+        "status":          "ok",
+        "version":         "v5",
+        "adapters":        list(_registry.keys()),
+        "stub_adapters":   stub_adapters,          # 降级适配器列表（前端可以展示提示）
+        "corpus_size":     _collection.count(),    # ChromaDB 向量库规模
+        "db_stats":        stats,                  # SQLite 统计
+        "chroma_path":     CHROMA_PATH,
     }
+
+
+@app.get("/api/history")
+async def history(limit: int = 20, modality: str = ""):
+    """返回估值历史记录（最近 limit 条）"""
+    records = get_history(
+        limit=min(limit, 100),
+        modality=modality if modality else None,
+    )
+    return {"records": records, "total": len(records)}
+
+
+@app.get("/api/history/{row_id}")
+async def history_detail(row_id: int):
+    """返回单条估值的完整详情"""
+    record = get_valuation_by_id(row_id)
+    if not record:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"记录 #{row_id} 不存在")
+    return record
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    _host = os.environ.get("BACKEND_HOST", "0.0.0.0")
+    _port = int(os.environ.get("BACKEND_PORT", "8000"))
+    print(f">> 启动服务: http://{_host}:{_port}")
+    print(f">> 允许跨域来源: {_allowed_origins}")
+    uvicorn.run(app, host=_host, port=_port)

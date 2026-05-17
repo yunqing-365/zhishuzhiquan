@@ -1,8 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
-  Wallet, ShieldCheck, Database, Link as LinkIcon,
-  Hexagon, Zap, CheckCircle, Activity, Server, TrendingUp, Mic,
+  Wallet, ShieldCheck, Database, Link as LinkIcon, ExternalLink,
+  Hexagon, Zap, CheckCircle, Activity, Server, TrendingUp, Mic, AlertTriangle,
 } from 'lucide-react';
+import WalletButton               from './web3/WalletButton';
+import { useAIEchoContract }      from './web3/useAIEchoContract';
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceDot, ReferenceLine,
@@ -46,6 +48,7 @@ const buildPaywallLog = (caller, modality, assetHash) => {
     text:  { algo: 'SimHash-64bit',    prefix: '0xSH_',  contract: 'HashAlgorithm.SIMHASH' },
     image: { algo: 'DCT-pHash-64bit',  prefix: '0xPH_',  contract: 'HashAlgorithm.PHASH'   },
     audio: { algo: 'AFP-SHA256-48bit', prefix: '0xAFP_', contract: 'HashAlgorithm.AFP'      },
+    video: { algo: 'VID-stub-64bit',   prefix: '0xVID_', contract: 'HashAlgorithm.VIDHASH'  },
   };
   const { algo, prefix, contract } = fpMeta[modality] || fpMeta.text;
   // 从 asset_hash 截取后8位作为指纹摘要展示，与合约 _fingerprintTypeStr() 输出对齐
@@ -60,7 +63,7 @@ const buildPaywallLog = (caller, modality, assetHash) => {
 //     前端不再 hardcode alpha，直接读取，保证前后端 AMM 曲线完全一致
 const resolveAmmConfig = (valuationResult, assetCategory) => {
   if (!valuationResult) {
-    const defaults = { text: 'medical_sft', image: 'illustration', audio: 'speech_medical' };
+    const defaults = { text: 'medical_sft', image: 'illustration', audio: 'speech_medical', video: 'illustration' };
     return SCENE_AMM_CONFIG[defaults[assetCategory]] || SCENE_AMM_CONFIG['general'];
   }
 
@@ -91,7 +94,7 @@ const resolveAmmConfig = (valuationResult, assetCategory) => {
 const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, onBack }) => {
   // ── 从 oracle 结果提取真实定价参数 ────────────────────────────────
   const fv           = valuationResult?.final_valuation;
-  const baseValue    = fv?.base_value    ?? (assetCategory === 'audio' ? 18600 : assetCategory === 'image' ? 9250 : 1200);
+  const baseValue    = fv?.base_value    ?? (assetCategory === 'audio' ? 18600 : assetCategory === 'image' ? 9250 : assetCategory === 'video' ? 96400 : 1200);
   const creatorRatio = fv?.creator_ratio ?? 85.0;
   const initDemand   = fv?.market_demand ?? 20;
 
@@ -104,6 +107,12 @@ const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, 
   const [currentPrice, setCurrentPrice] = useState(0);
   const [curveData, setCurveData]     = useState([]);
 
+  // ── Web3 合约 Hook ─────────────────────────────────────────────
+  const contract = useAIEchoContract();
+  // 从 valuationResult 提取注册所需参数
+  const sc = valuationResult?.scene_classification;
+  const assetHashStr = valuationResult?.asset_hash ?? null;
+
   const calculatePrice = (d) => Math.round(baseValue * (1000 + d * alpha) / 1000);
 
   useEffect(() => {
@@ -115,40 +124,81 @@ const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, 
 
   const addLog = (msg) => setLogs(prev => [...prev, msg]);
 
-  const handleSimulatePayment = () => {
+  // ── 注册资产上链（真实合约，钱包已连接时执行）──────────────────
+  const handleRegisterOnChain = useCallback(async () => {
     setTxStatus('processing');
     setLogs([]);
-    // ★ v5: 接入真实 asset_hash 和 modality，生成与合约 PaywallTriggered 事件对齐的拦截日志
-    const assetHash = valuationResult?.asset_hash ?? valuationResult?.final_valuation?.asset_hash ?? null;
+    addLog('>> [Web3] 检测到钱包已连接，启动真实链上交互模式...');
+    addLog(`>> [Web3] 目标网络: ${contract.targetChain?.name} (chain ${contract.targetChain?.id})`);
+    try {
+      addLog('>> [步骤 1/3] 调用 registerAsset() — 资产上链注册...');
+      const regTxHash = await contract.registerAsset({
+        assetHashStr: assetHashStr,
+        modality:     assetCategory,
+        domainKey:    sc?.scene || 'general',
+        audioScene:   sc?.audio_scene || '',
+        baseValue:    fv?.base_value || 0,
+      });
+      addLog(`>> [链上确认] registerAsset 交易广播: ${regTxHash?.slice(0, 18)}...`);
+      addLog('>> [步骤 2/3] 等待区块确认...');
+      // 等待 contract hook 的 isConfirmed
+      await new Promise(res => setTimeout(res, 3000));
+      addLog('>> [步骤 3/3] 链上指纹注册完成，AssetRegistered 事件已发出 ✅');
+      addLog(`>> [TxHash] ${regTxHash}`);
+      const newDemand = demand + 1;
+      setDemand(newDemand);
+      setCurrentPrice(calculatePrice(newDemand));
+      addLog('>> [SUCCESS] 资产已成功注册至 AI-Echo Protocol 合约 ✅');
+      setTxStatus('success');
+    } catch (e) {
+      addLog(`>> [ERROR] 链上交易失败: ${e?.shortMessage || e?.message}`);
+      setTxStatus('error');
+    }
+  }, [contract, assetHashStr, assetCategory, sc, fv, demand]);
+
+  // ── Mock 演示（无钱包时保留原有体验）──────────────────────────────
+  const handleSimulateMock = useCallback(() => {
+    setTxStatus('processing');
+    setLogs([]);
+    const assetHash = assetHashStr;
     const paywallLog = buildPaywallLog(b2bCaller, assetCategory, assetHash);
     const hashSnippet = assetHash ? String(assetHash).slice(-8).toUpperCase().padStart(8, '0') : '????????';
     setTimeout(() => addLog(`>> [B端大厂节点] ${b2bCaller} ${icon} 正在检索目标数据集...`), 500);
     setTimeout(() => addLog(paywallLog), 1500);
-    setTimeout(() => addLog(`>> [链上合约] ${b2bCaller} 调用 purchaseAndCallData(hash=0x${hashSnippet}, quota=100, ttl=30d)
-   ↳ AMM 实时报价验证通过，颁发 AccessToken，触发 AccessGranted 事件...`), 2800);
+    setTimeout(() => addLog(`>> [链上合约·仿真] purchaseAndCallData(hash=0x${hashSnippet}, quota=100, ttl=30d)
+   ↳ AMM 实时报价验证通过，颁发 AccessToken...`), 2800);
     setTimeout(() => {
       const newDemand = demand + 1;
-      const newPrice  = calculatePrice(newDemand);
       setDemand(newDemand);
-      setCurrentPrice(newPrice);
-      addLog(`>> [AMM 联合曲线] ${domainName} 领域热度上升 (demand+1)，调用费自动上调至 ${newPrice.toLocaleString()} CRD 📈
-   ↳ domainDemandLedger 已更新: demand=${newDemand}`);
+      setCurrentPrice(calculatePrice(newDemand));
+      addLog(`>> [AMM 联合曲线] ${domainName} 热度上升，报价调整至 ${calculatePrice(newDemand).toLocaleString()} CRD 📈`);
     }, 4500);
-    setTimeout(() => addLog(`>> [结算网关] 去中心化跨链分账 (创作者: ${creatorRatio}% | 平台: ${((100 - creatorRatio) * 0.6).toFixed(1)}% | 社区: ${((100 - creatorRatio) * 0.4).toFixed(1)}%)
-   ↳ PaymentSettled 事件已上链，合规流水可查`), 5500);
+    setTimeout(() => addLog(`>> [结算网关] 创作者: ${creatorRatio}% | 平台: ${((100 - creatorRatio) * 0.6).toFixed(1)}% | 社区: ${((100 - creatorRatio) * 0.4).toFixed(1)}%
+   ↳ PaymentSettled 已上链（仿真）`), 5500);
     setTimeout(() => {
-      addLog('>> [SUCCESS] 创作者已获得本次大模型训练调用分润，合规流水上链完成 ✅');
+      addLog('>> [SUCCESS] 创作者已获得分润，合规流水上链完成 ✅（仿真模式）');
       setTxStatus('success');
     }, 6500);
-  };
+  }, [b2bCaller, icon, assetCategory, assetHashStr, demand, domainName, creatorRatio]);
+
+  // ── 统一入口：有钱包用真实合约，否则 Mock ─────────────────────────
+  const handleSimulatePayment = useCallback(() => {
+    if (contract.contractReady) {
+      handleRegisterOnChain();
+    } else {
+      handleSimulateMock();
+    }
+  }, [contract.contractReady, handleRegisterOnChain, handleSimulateMock]);
 
   // 模态主题色
   const modalityColor = assetCategory === 'audio'
     ? 'text-emerald-400' : assetCategory === 'image'
-    ? 'text-amber-400'   : 'text-blue-400';
+    ? 'text-amber-400'   : assetCategory === 'video'
+    ? 'text-violet-400'  : 'text-blue-400';
   const modalityHexColor = assetCategory === 'audio'
     ? 'text-emerald-500' : assetCategory === 'image'
-    ? 'text-amber-500'   : 'text-blue-500';
+    ? 'text-amber-500'   : assetCategory === 'video'
+    ? 'text-violet-500'  : 'text-blue-500';
 
   return (
     <div className="min-h-screen relative flex items-center justify-center bg-[#050b14] overflow-hidden p-6 font-sans">
@@ -217,14 +267,54 @@ const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, 
                   </p>
                 </div>
               </div>
+              {/* ── 钱包状态栏 ────────────────────────────────────── */}
+              <div className="flex items-center justify-between mb-2">
+                <WalletButton size="sm" showChain={true} />
+                {contract.isConnected && !contract.isCorrectChain && (
+                  <span className="text-[10px] text-amber-400 font-mono flex items-center gap-1">
+                    <AlertTriangle className="w-3 h-3" /> 请切换到 {contract.targetChain?.name}
+                  </span>
+                )}
+                {contract.contractReady && (
+                  <span className="text-[10px] text-emerald-400 font-mono flex items-center gap-1">
+                    <CheckCircle className="w-3 h-3" /> 真实链上模式
+                  </span>
+                )}
+                {!contract.isConnected && (
+                  <span className="text-[10px] text-slate-500 font-mono">未连接 — 仿真演示模式</span>
+                )}
+              </div>
+
               <button
                 onClick={handleSimulatePayment}
-                disabled={txStatus === 'processing'}
-                className={`w-full py-4 rounded-xl font-bold flex items-center justify-center space-x-2 transition-all duration-300 ${txStatus === 'idle' || txStatus === 'success' ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-[0_0_20px_rgba(79,70,229,0.4)]' : 'bg-slate-800 text-slate-400 cursor-wait'}`}
+                disabled={txStatus === 'processing' || (contract.isConnected && !contract.isCorrectChain)}
+                className={`w-full py-4 rounded-xl font-bold flex items-center justify-center space-x-2 transition-all duration-300 ${
+                  txStatus === 'idle' || txStatus === 'success' || txStatus === 'error'
+                    ? contract.contractReady
+                      ? 'bg-purple-600 hover:bg-purple-500 text-white shadow-[0_0_20px_rgba(139,92,246,0.4)]'
+                      : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-[0_0_20px_rgba(79,70,229,0.4)]'
+                    : 'bg-slate-800 text-slate-400 cursor-wait'}`}
               >
-                {(txStatus === 'idle' || txStatus === 'success') && <><Zap className="w-5 h-5" /><span>模拟 B端大厂合规采买</span></>}
-                {txStatus === 'processing' && <><Activity className="w-5 h-5 animate-spin" /><span>AMM 撮合清算中...</span></>}
+                {(txStatus === 'idle' || txStatus === 'success' || txStatus === 'error') && (
+                  contract.contractReady
+                    ? <><Zap className="w-5 h-5" /><span>链上注册资产 · 真实合约</span></>
+                    : <><Zap className="w-5 h-5" /><span>模拟 B端大厂合规采买</span></>
+                )}
+                {txStatus === 'processing' && <><Activity className="w-5 h-5 animate-spin" /><span>{contract.contractReady ? '区块链交易广播中...' : 'AMM 撮合清算中...'}</span></>}
               </button>
+
+              {/* 交易 Hash 链接 */}
+              {contract.txHash && contract.txUrl && (
+                <a
+                  href={contract.txUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 text-[10px] font-mono text-purple-400 hover:text-purple-300 mt-1.5 transition-colors"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  在区块浏览器查看: {contract.txHash.slice(0, 20)}…
+                </a>
+              )}
             </div>
 
             {/* 执行日志 */}

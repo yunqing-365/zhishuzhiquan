@@ -44,6 +44,7 @@ const ADAPTER_LABEL = {
   text:  { label: 'Text-Adapter',  cls: 'bg-blue-900/20 text-blue-400 border-blue-500/30'    },
   image: { label: 'Image-Adapter', cls: 'bg-amber-900/20 text-amber-400 border-amber-500/30' },
   audio: { label: 'Audio-Adapter', cls: 'bg-emerald-900/20 text-emerald-400 border-emerald-500/30' },
+  video: { label: 'Video-Adapter', cls: 'bg-violet-900/20 text-violet-400 border-violet-500/30' },
 };
 
 // Mock 数据（API 未启动时）
@@ -126,17 +127,19 @@ const buildMock = (assetCategory, sceneOverride) => {
     };
   }
 
-  // 文本 / 图像模态（保持原逻辑）
-  const mockScene = sceneOverride || (isImg ? 'illustration' : 'medical_sft');
-  const tev   = isImg ? '50x'    : '1x';
-  const scMult= isImg ? '1.5x'   : '1.35x';
-  const effW  = isImg ? '75x'    : '1.35x';
-  const baseVal   = isImg ? 13275 : 239;
-  const dynPrice  = isImg ? 16279 : 298;
-  const optPremium= isImg ? 4012  : 68;
+  // 文本 / 图像 / 视频 模态
+  const isVideo = assetCategory === 'video';
+  const mockScene = sceneOverride || (isImg ? 'illustration' : isVideo ? 'illustration' : 'medical_sft');
+  const tev   = isImg ? '50x'    : isVideo ? '500x'  : '1x';
+  const scMult= isImg ? '1.5x'   : isVideo ? '8.0x'  : '1.35x';
+  const effW  = isImg ? '75x'    : isVideo ? '4000x' : '1.35x';
+  const baseVal   = isImg ? 13275 : isVideo ? 96400 : 239;
+  const dynPrice  = isImg ? 16279 : isVideo ? 118100 : 298;
+  const optPremium= isImg ? 4012  : isVideo ? 32600  : 68;
   const metricNames = {
     text:  ['信息熵密度(抗废话)', '场景信噪比', '实体拓扑密度(GraphRAG)', '语料库稀缺度', '大模型微调增益', 'KNN-Shapley贡献度'],
     image: ['CLIP语义对齐度', '频域隐写鲁棒性(DWT)', 'LAION美学评级', '画派风格稀缺度', 'LoRA微调增益', 'KNN-Shapley贡献度'],
+    video: ['帧多样性(描述代理·A)', '视频码率质量(代理·A)', '镜头结构复杂度(代理·A)', '视频库稀缺度', '视频训练增益(代理·A)', 'KNN-Shapley贡献度'],
   }[assetCategory] || [];
   const scores = isImg ? [92, 95, 96, 96, 89, 85] : [88, 82, 85, 93, 80, 91];
   return {
@@ -197,6 +200,7 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
       text:  ['信息熵密度(抗废话)', '场景信噪比', '实体拓扑密度(GraphRAG)', '语料库稀缺度', '大模型微调增益', 'KNN-Shapley贡献度'],
       image: ['CLIP语义对齐度', '频域隐写鲁棒性(DWT)', 'LAION美学评级', '画派风格稀缺度', 'LoRA微调增益', 'KNN-Shapley贡献度'],
       audio: ['频谱熵(信息密度)', 'PESQ感知信噪比', '语音指令连贯性', '音频库稀缺度', 'ASR微调增益', 'KNN-Shapley贡献度'],
+      video: ['帧多样性(描述代理·A)', '视频码率质量(代理·A)', '镜头结构复杂度(代理·A)', '视频库稀缺度', '视频训练增益(代理·A)', 'KNN-Shapley贡献度'],
     }[assetCategory] || [];
     setChartData(defaultNames.map(n => ({ subject: n, score: 0, fullMark: 100 })));
 
@@ -228,7 +232,7 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
           scene_override: sceneOverride ?? null,
           audio_data:     audioData ?? null,
         };
-        const res = await fetch('http://127.0.0.1:8000/api/valuate', {
+        const res = await fetch('/api/valuate', {
           method:  'POST',
           headers: { 'Content-Type': 'application/json' },
           body:    JSON.stringify(body),
@@ -401,6 +405,31 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
                   <div className="flex items-center gap-1">
                     <span className="text-slate-600">|</span>
                     <span className="text-slate-400">{meta.modality_label}</span>
+                  </div>
+                )}
+                {meta?.corpus_size !== undefined && (
+                  <div className="flex items-center gap-1">
+                    <span className="text-slate-600">|</span>
+                    <span className="text-slate-500">知识库</span>
+                    <span className="text-purple-400 font-mono font-bold">{meta.corpus_size}</span>
+                    <span className="text-slate-500">条</span>
+                  </div>
+                )}
+                {meta?.vector_distance !== undefined && (
+                  <div className="flex items-center gap-1">
+                    <span className="text-slate-600">|</span>
+                    <span className="text-slate-500">稀缺度</span>
+                    <span className={`font-mono font-bold ${meta.vector_distance > 0.8 ? 'text-emerald-400' : meta.vector_distance > 0.5 ? 'text-amber-400' : 'text-red-400'}`}>
+                      {(meta.vector_distance * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                )}
+                {meta?.adapter_version?.includes('stub') && (
+                  <div className="flex items-center gap-1">
+                    <span className="text-slate-600">|</span>
+                    <span className="px-1.5 py-0.5 rounded border border-violet-500/30 bg-violet-900/20 text-violet-400 text-[9px] font-bold">
+                      Stage A · 描述代理
+                    </span>
                   </div>
                 )}
               </div>
