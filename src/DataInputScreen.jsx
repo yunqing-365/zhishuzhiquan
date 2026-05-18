@@ -130,6 +130,7 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
   const [assetCategory, setAssetCategory] = useState('image');
   const [inputText, setInputText]       = useState('');
   const [selectedImage, setSelectedImage] = useState(null);
+  const [imageB64, setImageB64]           = useState(null);         // base64 图像
   const [activePreset, setActivePreset] = useState(null);
   const [sceneOverride, setSceneOverride] = useState('');
   const [showDebug, setShowDebug]       = useState(false);
@@ -229,7 +230,8 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
     setActivePreset(preset.label);
     setAssetCategory(preset.category);
     setInputText(preset.description);
-    setSelectedImage(preset.category === 'image' ? 'preset_image.png' : null);
+    setSelectedImage(preset.category === 'image' ? '[Demo 预设图像]' : null);
+    setImageB64(null);  // Demo 预设无真实图像，后端以描述文字代理
     setAudioB64(null);
     setAudioFileName(null);
     setSceneOverride('');
@@ -244,6 +246,7 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
     setSelectedImage(null);
     setAudioB64(null);
     setAudioFileName(null);
+    setImageB64(null);
     setActivePreset(null);
     setSceneOverride('');
   };
@@ -298,7 +301,7 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
       } else {
         clearInterval(interval);
         // 第 5 参数传 audioB64（文本/图像为 null）
-        setTimeout(() => onComplete(desc, assetCategory, enableZK, sceneOverride || null, audioB64 || null), 1200);
+        setTimeout(() => onComplete(desc, assetCategory, enableZK, sceneOverride || null, audioB64 || null, imageB64 || null), 1200);
       }
     }, 750);
   };
@@ -406,13 +409,27 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
             {assetCategory === 'image' && (
               <div className="space-y-3">
                 <div
-                  onClick={() => setSelectedImage('user_artwork.png')}
+                  onClick={() => document.getElementById('img-upload-input').click()}
                   className={`w-full h-24 bg-slate-950/50 border-2 border-dashed rounded-xl flex flex-col items-center justify-center cursor-pointer transition-colors ${selectedImage ? 'border-amber-500 bg-amber-900/10' : 'border-slate-700 hover:border-slate-500'}`}
                 >
                   {selectedImage
-                    ? <><ShieldCheck className="w-6 h-6 text-amber-400 mb-1" /><p className="text-xs text-amber-400 font-bold">画作已加载入沙箱</p></>
-                    : <><UploadCloud className="w-6 h-6 text-slate-500 mb-1" /><p className="text-xs text-slate-300 font-bold">点击上传商业插画原稿</p></>}
+                    ? <><ShieldCheck className="w-6 h-6 text-amber-400 mb-1" /><p className="text-xs text-amber-400 font-bold">✓ 画作已加载入沙箱</p><p className="text-[10px] text-amber-600 mt-0.5 truncate max-w-[180px]">{selectedImage}</p></>
+                    : <><UploadCloud className="w-6 h-6 text-slate-500 mb-1" /><p className="text-xs text-slate-300 font-bold">点击上传商业插画原稿</p><p className="text-[10px] text-slate-600 mt-0.5">支持 JPG / PNG / WEBP</p></>}
                 </div>
+                <input
+                  id="img-upload-input"
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    setSelectedImage(file.name);
+                    const reader = new FileReader();
+                    reader.onloadend = () => setImageB64(reader.result.split(',')[1]);
+                    reader.readAsDataURL(file);
+                  }}
+                />
                 <div>
                   <p className="text-[10px] text-slate-500 mb-1.5 flex items-center gap-1">
                     <Tag className="w-3 h-3" />

@@ -106,6 +106,7 @@ const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, 
   const [demand, setDemand]           = useState(initDemand);
   const [currentPrice, setCurrentPrice] = useState(0);
   const [curveData, setCurveData]     = useState([]);
+  const [purchaseHistory, setPurchaseHistory] = useState([]); // ★ v6: 历史采购点
 
   // ── Web3 合约 Hook ─────────────────────────────────────────────
   const contract = useAIEchoContract();
@@ -170,8 +171,10 @@ const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, 
     setTimeout(() => {
       const newDemand = demand + 1;
       setDemand(newDemand);
-      setCurrentPrice(calculatePrice(newDemand));
-      addLog(`>> [AMM 联合曲线] ${domainName} 热度上升，报价调整至 ${calculatePrice(newDemand).toLocaleString()} CRD 📈`);
+      const newPrice = calculatePrice(newDemand);
+      setCurrentPrice(newPrice);
+      setPurchaseHistory(h => [...h, { demand: newDemand, price: newPrice, label: 'SIM' }]);
+      addLog(`>> [AMM 联合曲线] ${domainName} 热度上升，报价调整至 ${newPrice.toLocaleString()} CRD 📈`);
     }, 4500);
     setTimeout(() => addLog(`>> [结算网关] 创作者: ${creatorRatio}% | 平台: ${((100 - creatorRatio) * 0.6).toFixed(1)}% | 社区: ${((100 - creatorRatio) * 0.4).toFixed(1)}%
    ↳ PaymentSettled 已上链（仿真）`), 5500);
@@ -356,6 +359,9 @@ const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, 
                     <Area type="monotone" dataKey="price" stroke="#8b5cf6" strokeWidth={3} fillOpacity={1} fill="url(#colorPrice)" animationDuration={500} />
                     <ReferenceLine x={demand} stroke="#4f46e5" strokeDasharray="3 3" />
                     <ReferenceDot x={demand} y={currentPrice} r={6} fill="#8b5cf6" stroke="#fff" strokeWidth={2} />
+                    {purchaseHistory.map((pt, i) => (
+                      <ReferenceDot key={i} x={pt.demand} y={pt.price} r={4} fill={pt.label === 'TX' ? '#10b981' : '#f59e0b'} stroke="#0f172a" strokeWidth={1.5} label={{ value: pt.label, position: 'top', fontSize: 8, fill: '#94a3b8' }} />
+                    ))}
                   </AreaChart>
                 </ResponsiveContainer>
               </div>

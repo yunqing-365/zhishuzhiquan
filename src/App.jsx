@@ -11,6 +11,7 @@ import SmartSplitScreen           from './SmartSplitScreen';
 import HistoryPanel               from './HistoryPanel';
 import WalletButton               from './web3/WalletButton';
 import { wagmiConfig, targetChain } from './web3/config';
+import { useApiHealth }           from './api';
 
 // ── React Query Client（wagmi v2 依赖）────────────────────────────
 const queryClient = new QueryClient({
@@ -25,6 +26,22 @@ const STEPS = [
 ];
 
 // ─── 进度条组件 ────────────────────────────────────────────────────
+// ── 后端心跳状态指示器 ────────────────────────────────────────────
+const BackendStatus = () => {
+  const { status, version, corpusSize } = useApiHealth();
+  const cfg = {
+    checking: { dot: 'bg-slate-500 animate-pulse', text: 'text-slate-500', label: '连接中...' },
+    online:   { dot: 'bg-emerald-500',             text: 'text-emerald-400', label: `后端 ${version || 'v?'} · 库${corpusSize ?? '?'}条` },
+    offline:  { dot: 'bg-red-500',                 text: 'text-red-400',    label: 'Mock 模式' },
+  }[status];
+  return (
+    <div className={`shrink-0 flex items-center gap-1.5 text-[10px] font-mono ${cfg.text}`}>
+      <span className={`w-1.5 h-1.5 rounded-full ${cfg.dot}`} />
+      <span className="hidden md:inline">{cfg.label}</span>
+    </div>
+  );
+};
+
 const ProgressBar = ({ step, category, onBack, canGoBack, onHistory }) => {
   const modeColor = {
     audio: 'bg-emerald-500',
@@ -96,6 +113,9 @@ const ProgressBar = ({ step, category, onBack, canGoBack, onHistory }) => {
         {category || 'text'}
       </div>
 
+      {/* ★ 后端心跳状态 */}
+      <BackendStatus />
+
       {/* ★ 钱包连接按钮（步骤3时高亮） */}
       <div className="shrink-0">
         <WalletButton size="sm" showChain={step === 3} />
@@ -112,6 +132,7 @@ function AppInner() {
   const [isZkMode, setIsZkMode]             = useState(true);
   const [sceneOverride, setSceneOverride]   = useState(null);
   const [audioData, setAudioData]           = useState(null);
+  const [imageData, setImageData]           = useState(null);
   const [valuationResult, setValuationResult] = useState(null);
   const [showHistory, setShowHistory]       = useState(false);
   const [stepHistory, setStepHistory]       = useState([]);
@@ -136,15 +157,17 @@ function AppInner() {
     setIsZkMode(true);
     setSceneOverride(null);
     setAudioData(null);
+    setImageData(null);
     setValuationResult(null);
   }, []);
 
-  const handleInputComplete = useCallback((data, category, zkEnabled, override, audioB64) => {
+  const handleInputComplete = useCallback((data, category, zkEnabled, override, audioB64, imgB64) => {
     setAssetData(data);
     setAssetCategory(category);
     setIsZkMode(zkEnabled);
     setSceneOverride(override ?? null);
     setAudioData(audioB64 ?? null);
+    setImageData(imgB64 ?? null);
     goTo(2);
   }, [goTo]);
 
@@ -181,6 +204,7 @@ function AppInner() {
             isZkMode={isZkMode}
             sceneOverride={sceneOverride}
             audioData={audioData}
+            imageData={imageData}
             onNext={handleValuationNext}
           />
         )}

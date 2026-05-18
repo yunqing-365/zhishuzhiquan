@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiClient, ApiError } from './api';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts';
 import { Activity, ShieldCheck, FileText, Network, CheckCircle2, ArrowRight, Tag, Layers, FlaskConical, Mic } from 'lucide-react';
 
@@ -176,7 +177,7 @@ const buildMock = (assetCategory, sceneOverride) => {
 };
 
 // ★ v4: 接收 audioData prop，onNext 回传完整 valuationResult
-const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverride, audioData, onNext }) => {
+const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverride, audioData, imageData, onNext }) => {
   const [isCalculating, setIsCalculating]     = useState(true);
   const [calcStep, setCalcStep]               = useState(0);
   const [chartData, setChartData]             = useState([]);
@@ -221,47 +222,36 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
     };
 
     const fetchValuation = async () => {
-      // ★ v5: 5 秒超时，避免后端未启动时 hang 住
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 5000);
+      // ★ v6: 使用统一 apiClient，超时/重试/错误分类统一处理
       try {
-        const body = {
+        const data = await apiClient.valuate({
           asset_category: assetCategory,
           description:    assetData,
           is_zk_mode:     isZkMode,
           scene_override: sceneOverride ?? null,
           audio_data:     audioData ?? null,
-        };
-        const res = await fetch('/api/valuate', {
-          method:  'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify(body),
-          signal:  controller.signal,
+          image_data:     imageData ?? null,  // ★ v6: 真实图像 base64
         });
-        clearTimeout(timer);
-        if (!res.ok) {
-          const errText = await res.text().catch(() => 'HTTP Error');
-          throw new Error(`HTTP ${res.status}: ${errText.slice(0, 120)}`);
-        }
-        const data = await res.json();
         const metrics = normalizeMetrics(data.metrics);
         setTimeout(() => {
           clearInterval(ticker);
-          setDataSource('api');          // ★ v5: 标记真实 API
+          setDataSource('api');
           setValuationResult(data);
           if (metrics) setChartData(metrics);
           setIsCalculating(false);
         }, 4200);
       } catch (err) {
-        clearTimeout(timer);
-        // ★ v5: 区分超时 vs 网络错误 vs 服务器错误
-        const isTimeout = err.name === 'AbortError';
-        const errMsg = isTimeout ? '后端连接超时 (5s)' : err.message;
+        // ApiError.type: 'TIMEOUT' | 'NETWORK' | 'SERVER'
+        const errMsg = err instanceof ApiError
+          ? (err.type === 'TIMEOUT'  ? `后端连接超时 (8s)` :
+             err.type === 'NETWORK'  ? `网络错误: ${err.message}` :
+             err.type === 'SERVER'   ? `服务器错误 ${err.status}` : err.message)
+          : (err.message || '未知错误');
         const mock = buildMock(assetCategory, sceneOverride);
         setTimeout(() => {
           clearInterval(ticker);
-          setDataSource('mock');         // ★ v5: 标记 mock 来源
-          setApiError(errMsg);           // ★ v5: 保存错误信息
+          setDataSource('mock');
+          setApiError(errMsg);
           setValuationResult(mock);
           setChartData(mock.metrics);
           setIsCalculating(false);

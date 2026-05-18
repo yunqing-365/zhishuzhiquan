@@ -241,13 +241,13 @@ def _build_registry(clf: SceneClassifier) -> Dict[str, ModalityConfig]:
 
 
 # ── FastAPI ───────────────────────────────────────────────────────────
-app = FastAPI(title="AI-Echo Multi-modal Oracle v4")
-# CORS 配置：开发允许所有来源，生产从环境变量读取
+app = FastAPI(title="AI-Echo Multi-modal Oracle v6")
+# CORS 配置：生产从 ALLOWED_ORIGINS 环境变量读取，开发仅允许本地 Vite
 _raw_origins = os.environ.get("ALLOWED_ORIGINS", "")
 _allowed_origins = (
     [o.strip() for o in _raw_origins.split(",") if o.strip()]
     if _raw_origins
-    else ["*"]  # 未配置时开发模式允许所有（上线前必须改）
+    else ["http://localhost:5173", "http://localhost:5174"]  # ★ v6: 不再用 *
 )
 app.add_middleware(
     CORSMiddleware,
@@ -255,6 +255,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ★ v6: 安全中间件（限流 + 请求日志）
+try:
+    from middleware import setup_security
+    setup_security(app)
+except ImportError:
+    print("!! [security] middleware.py 未找到，跳过限流中间件")
 
 _clf      = SceneClassifier()
 _registry = _build_registry(_clf)
@@ -483,6 +490,27 @@ async def history_detail(row_id: int):
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail=f"记录 #{row_id} 不存在")
     return record
+
+
+@app.get("/api/history/search")
+async def history_search(q: str = "", limit: int = 20):
+    """按描述文本模糊搜索历史记录 (v2 新增)"""
+    from storage import search_history
+    if not q.strip():
+        return {"records": [], "total": 0}
+    records = search_history(q.strip(), limit=min(limit, 50))
+    return {"records": records, "total": len(records)}
+
+
+@app.delete("/api/history/{row_id}")
+async def delete_history(row_id: int):
+    """软删除单条历史记录 (v2 新增)"""
+    from storage import delete_valuation
+    ok = delete_valuation(row_id)
+    if not ok:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"记录 #{row_id} 不存在或删除失败")
+    return {"deleted": True, "id": row_id}
 
 
 if __name__ == "__main__":
