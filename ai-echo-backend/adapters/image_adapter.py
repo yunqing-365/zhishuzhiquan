@@ -242,6 +242,8 @@ class _ImageExtractor:
         # ── Shapley ───────────────────────────────────────────────
         corpus  = get_corpus_fn() if get_corpus_fn else []
         shapley = knn_shapley_score(effective_emb, corpus)
+        # CLIP 可用时置信度更高（真实向量空间），否则降级置信度
+        shapley_confidence = 0.75 if clip_ok else 0.45
 
         # ── llm_value（v3：加入 CLIP semantic 贡献）──────────────
         clip_contrib = (clip_aesthetic / 100.0 * 30.0) if clip_ok and clip_aesthetic >= 0 else 0.0
@@ -255,8 +257,9 @@ class _ImageExtractor:
             "llm_value": round(min(100.0, llm_value), 1),
             "shapley":   round(shapley, 1),
             # v3 私有调试字段
-            "_clip_available": clip_ok,
-            "_clip_aesthetic": round(clip_aesthetic, 1) if clip_aesthetic >= 0 else None,
+            "_clip_available":    clip_ok,
+            "_clip_aesthetic":    round(clip_aesthetic, 1) if clip_aesthetic >= 0 else None,
+            "_shapley_confidence": round(shapley_confidence, 3),
         }
 
 

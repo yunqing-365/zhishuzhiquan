@@ -49,3 +49,12 @@ python-dotenv==1.0.1         # 读取 .env 文件
 
 # 注意：以上两项不写入固定版本，避免 CPU/GPU 环境冲突。
 # 需要时手动安装，系统会自动检测并启用，未安装则静默降级。
+
+# VideoAdapter v1: OpenCV 帧采样（Stage B 核心依赖）
+# pip install opencv-python-headless  （无 GUI，服务器推荐）
+# 或桌面环境: pip install opencv-python
+# opencv-python-headless>=4.8.0
+
+# 图像感知哈希（ImageAdapter + VideoAdapter）
+# pip install ImageHash
+# ImageHash>=4.3.1

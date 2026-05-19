@@ -234,8 +234,8 @@ def _build_registry(clf: SceneClassifier) -> Dict[str, ModalityConfig]:
             label           = "视频影像",
             tev             = MODALITY_TEV["video"],
             classify_fn     = _video_classify,
-            extra_fn        = lambda a: {},
-            adapter_version = "v0-stub",
+            extra_fn        = lambda a: {"video_data": a.video_data},
+            adapter_version = "v1-stage-b",
         ),
     }
 
@@ -274,6 +274,7 @@ class AssetData(BaseModel):
     is_zk_mode:     bool         = True
     image_data:     Optional[str] = None   # base64 图像
     audio_data:     Optional[str] = None   # base64 音频 WAV/MP3
+    video_data:     Optional[str] = None   # base64 视频 MP4/AVI/MOV（v1 新增）
     scene_override: Optional[str] = None   # 强制指定场景（调试用）
 
 

@@ -652,7 +652,7 @@ class AudioAdapter(BaseModalityAdapter):
             "shapley":   round(min(100.0, max(0.0, shapley_score)), 1),
             # 内部字段 (oracle_engine 读取用)
             "_audio_scene":       audio_scene,
-            "_shapley_conf":      round(shapley_conf, 3),
+            "_shapley_confidence": round(shapley_conf, 3),
             "_has_wave":          has_wave,
             # v2 新增私有字段
             "_whisper_text":      whisper_txt[:200] if whisper_txt else None,
