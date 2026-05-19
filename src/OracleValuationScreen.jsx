@@ -16,6 +16,11 @@ const SCENE_LABELS = {
   diagram:      { label: '图表图解',   color: 'text-violet-400',  bg: 'bg-violet-900/20 border-violet-500/30', mult: '0.55×' },
   noise:        { label: '噪声/废话',  color: 'text-red-500',     bg: 'bg-red-950/30 border-red-700/30',       mult: '0.05×' },
   general:      { label: '通用音频',   color: 'text-slate-400',   bg: 'bg-slate-900/30 border-slate-600/30',   mult: '1.00×' },
+  // ★ v5 视频场景覆盖标签（vid_ 前缀映射到 image 场景分类器）
+  vid_cinematic: { label: '影视创作',  color: 'text-violet-400',  bg: 'bg-violet-900/20 border-violet-500/30', mult: '1.50×' },
+  vid_doc:       { label: '纪录/访谈', color: 'text-purple-400',  bg: 'bg-purple-900/20 border-purple-500/30', mult: '1.00×' },
+  vid_edu:       { label: '教学讲解',  color: 'text-indigo-400',  bg: 'bg-indigo-900/20 border-indigo-500/30', mult: '0.55×' },
+  vid_user_gen:  { label: '日常记录',  color: 'text-slate-400',   bg: 'bg-slate-900/30 border-slate-600/30',   mult: '0.25×' },
 };
 
 // 音频细粒度场景标签（audio_scene 字段，仅音频模态）
@@ -130,7 +135,17 @@ const buildMock = (assetCategory, sceneOverride) => {
 
   // 文本 / 图像 / 视频 模态
   const isVideo = assetCategory === 'video';
-  const mockScene = sceneOverride || (isImg ? 'illustration' : isVideo ? 'illustration' : 'medical_sft');
+  // vid_ 前缀的视频场景覆盖映射到对应的图像/文本场景
+  const VID_SCENE_MAP = {
+    vid_cinematic: 'illustration',
+    vid_doc:       'photo',
+    vid_edu:       'diagram',
+    vid_user_gen:  'screenshot',
+  };
+  const resolvedOverride = (isVideo && sceneOverride && VID_SCENE_MAP[sceneOverride])
+    ? VID_SCENE_MAP[sceneOverride]
+    : sceneOverride;
+  const mockScene = resolvedOverride || (isImg ? 'illustration' : isVideo ? 'illustration' : 'medical_sft');
   const tev   = isImg ? '50x'    : isVideo ? '500x'  : '1x';
   const scMult= isImg ? '1.5x'   : isVideo ? '8.0x'  : '1.35x';
   const effW  = isImg ? '75x'    : isVideo ? '4000x' : '1.35x';
@@ -177,7 +192,8 @@ const buildMock = (assetCategory, sceneOverride) => {
 };
 
 // ★ v4: 接收 audioData prop，onNext 回传完整 valuationResult
-const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverride, audioData, imageData, onNext }) => {
+// ★ v5: 新增 videoData prop
+const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverride, audioData, imageData, videoData, onNext }) => {
   const [isCalculating, setIsCalculating]     = useState(true);
   const [calcStep, setCalcStep]               = useState(0);
   const [chartData, setChartData]             = useState([]);
@@ -231,6 +247,7 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
           scene_override: sceneOverride ?? null,
           audio_data:     audioData ?? null,
           image_data:     imageData ?? null,  // ★ v6: 真实图像 base64
+          video_data:     videoData ?? null,  // ★ v5: 视频 base64
         });
         const metrics = normalizeMetrics(data.metrics);
         setTimeout(() => {

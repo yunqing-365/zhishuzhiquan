@@ -133,6 +133,7 @@ function AppInner() {
   const [sceneOverride, setSceneOverride]   = useState(null);
   const [audioData, setAudioData]           = useState(null);
   const [imageData, setImageData]           = useState(null);
+  const [videoData, setVideoData]           = useState(null);
   const [valuationResult, setValuationResult] = useState(null);
   const [showHistory, setShowHistory]       = useState(false);
   const [stepHistory, setStepHistory]       = useState([]);
@@ -158,16 +159,18 @@ function AppInner() {
     setSceneOverride(null);
     setAudioData(null);
     setImageData(null);
+    setVideoData(null);
     setValuationResult(null);
   }, []);
 
-  const handleInputComplete = useCallback((data, category, zkEnabled, override, audioB64, imgB64) => {
+  const handleInputComplete = useCallback((data, category, zkEnabled, override, audioB64, imgB64, videoB64) => {
     setAssetData(data);
     setAssetCategory(category);
     setIsZkMode(zkEnabled);
     setSceneOverride(override ?? null);
     setAudioData(audioB64 ?? null);
     setImageData(imgB64 ?? null);
+    setVideoData(videoB64 ?? null);
     goTo(2);
   }, [goTo]);
 
@@ -205,6 +208,7 @@ function AppInner() {
             sceneOverride={sceneOverride}
             audioData={audioData}
             imageData={imageData}
+            videoData={videoData}
             onNext={handleValuationNext}
           />
         )}

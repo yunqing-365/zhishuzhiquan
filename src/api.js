@@ -86,6 +86,7 @@ export const apiClient = {
    *   - scene_override: string | null
    *   - audio_data: base64 string | null
    *   - image_data: base64 string | null
+   *   - video_data: base64 string | null  (★ v5: MP4/MOV/WEBM, VideoAdapter Stage B)
    * 返回: valuationResult 对象（与 OracleValuationScreen 期待格式完全对齐）
    */
   async valuate(payload) {

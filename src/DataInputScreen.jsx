@@ -32,6 +32,22 @@ const DEMO_PRESETS = [
     category: 'image',
     description: '浏览器截图，Chrome界面截屏，普通桌面UI截图',
   },
+  // ★ v5 视频预设
+  {
+    label: '电影级短片 (film_cinematic)',
+    category: 'video',
+    description: '4K电影级短片，专业摄影机拍摄，LOG格式调色，多镜头切换，手持+稳定器混用，内容：城市夜景空镜与人物情感独白，时长3分28秒，配乐原创，首发未授权。',
+  },
+  {
+    label: '医疗手术纪录片 (documentary_medical)',
+    category: 'video',
+    description: '医院手术室纪录片片段，腹腔镜微创手术全程记录，专业医疗摄像机，清晰度4K，涵盖术前准备、手术操作、术后处置完整流程，用于医学教学授权素材库。',
+  },
+  {
+    label: '教学讲解视频 (edu_lecture)',
+    category: 'video',
+    description: '高校公开课视频，量子计算基础理论讲解，教授口述配合白板推导，配备字幕与章节标记，30分钟完整课时，画质1080P，音质清晰，适合AI教育训练集。',
+  },
   // ★ v4 音频预设
   {
     label: '临床语音转录 (speech_medical)',
@@ -72,11 +88,11 @@ const SCENE_OVERRIDE_OPTIONS = [
   { value: 'ambient_sfx',    label: '🌿 环境音效  ×0.60', group: 'audio' },
   { value: 'noise',          label: '🚫 噪声/废话  ×0.05', group: 'audio' },
 
-  // ── 视频场景 (Stage A 降级，真实帧采样接入后子场景细化) ──
-  { value: 'illustration', label: '🎬 影视创作  ×8.0',  group: 'video' },
-  { value: 'photo',        label: '📹 纪录/访谈  ×6.0',  group: 'video' },
-  { value: 'diagram',      label: '🎓 教学讲解  ×5.5',  group: 'video' },
-  { value: 'screenshot',   label: '📱 日常记录  ×3.0',  group: 'video' },
+  // ── 视频场景 ──
+  { value: 'vid_cinematic', label: '🎬 影视创作  ×8.0',  group: 'video' },
+  { value: 'vid_doc',       label: '📹 纪录/访谈  ×6.0',  group: 'video' },
+  { value: 'vid_edu',       label: '🎓 教学讲解  ×5.5',  group: 'video' },
+  { value: 'vid_user_gen',  label: '📱 日常记录  ×3.0',  group: 'video' },
 ];
 
 // ─── 波形可视化组件（仅在有 AudioContext 时渲染）──────────────────────
@@ -142,12 +158,18 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
   const [audioFileName, setAudioFileName] = useState(null);     // 上传文件名
   const [recSeconds, setRecSeconds]     = useState(0);          // 录音计时
 
-  const mediaRecorderRef = useRef(null);
-  const chunksRef        = useRef([]);
-  const analyserRef      = useRef(null);
-  const audioCtxRef      = useRef(null);
-  const timerRef         = useRef(null);
-  const fileInputRef     = useRef(null);
+  // ★ v5 视频状态
+  const [videoB64, setVideoB64]           = useState(null);       // base64 video
+  const [videoFileName, setVideoFileName] = useState(null);       // 文件名
+  const [videoMeta, setVideoMeta]         = useState(null);       // { size, type }
+
+  const mediaRecorderRef   = useRef(null);
+  const chunksRef          = useRef([]);
+  const analyserRef        = useRef(null);
+  const audioCtxRef        = useRef(null);
+  const timerRef           = useRef(null);
+  const fileInputRef       = useRef(null);
+  const videoFileInputRef  = useRef(null);
 
   // ─ 清理录音资源
   const stopRecording = useCallback(() => {
@@ -222,8 +244,10 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
   };
 
   const getDescriptionForBackend = () => {
-    if (assetCategory === 'text') return inputText;
-    return inputText || (assetCategory === 'audio' ? '音频语料' : '原创图像');
+    if (assetCategory === 'text')  return inputText;
+    if (assetCategory === 'audio') return inputText || '音频语料';
+    if (assetCategory === 'video') return inputText || '视频影像';
+    return inputText || '原创图像';
   };
 
   const handlePreset = (preset) => {
@@ -231,9 +255,12 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
     setAssetCategory(preset.category);
     setInputText(preset.description);
     setSelectedImage(preset.category === 'image' ? '[Demo 预设图像]' : null);
-    setImageB64(null);  // Demo 预设无真实图像，后端以描述文字代理
+    setImageB64(null);
     setAudioB64(null);
     setAudioFileName(null);
+    setVideoB64(null);
+    setVideoFileName(null);
+    setVideoMeta(null);
     setSceneOverride('');
     if (isRecording) stopRecording();
   };
@@ -247,8 +274,25 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
     setAudioB64(null);
     setAudioFileName(null);
     setImageB64(null);
+    setVideoB64(null);
+    setVideoFileName(null);
+    setVideoMeta(null);
     setActivePreset(null);
     setSceneOverride('');
+  };
+
+  // ─ 上传视频文件
+  const handleVideoFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setVideoB64(reader.result.split(',')[1]);
+      setVideoFileName(file.name);
+      setVideoMeta({ size: file.size, type: file.type });
+    };
+    reader.readAsDataURL(file);
+    setVideoB64(null);
   };
 
   const getProcessingSteps = (category, isZk) => {
@@ -264,6 +308,10 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
         steps.push({ p: 28, text: `【Stage 2 — 场景分类】SceneClassifier v4 分析图像描述，识别子场景...${overrideNote}` });
         steps.push({ p: 45, text: '【Stage 3 — 特征提取】ImageAdapter: LAION-Aesthetics 美学评估 + DWT 隐写鲁棒性...' });
         steps.push({ p: 62, text: '【Stage 3 — 稀缺度】CLIP 512维特征对齐，计算画派风格稀缺度...' });
+      } else if (category === 'video') {
+        steps.push({ p: 28, text: `【Stage 2 — 场景分类】VideoAdapter v1 Stage-B: 图像分类器代理 + 描述关键词${overrideNote}` });
+        steps.push({ p: 45, text: '【Stage 3 — 帧采样】OpenCV 均匀采样16帧 → CLIP ViT-B/32 per-frame 特征提取...' });
+        steps.push({ p: 62, text: '【Stage 3 — 时序聚合】帧特征 mean+std → 时域多样性 + 镜头切换密度 + CLIP 美学评分...' });
       } else {
         steps.push({ p: 28, text: `【Stage 2 — 场景分类】SceneClassifier v4 分析文本领域，识别子场景...${overrideNote}` });
         steps.push({ p: 45, text: '【Stage 3 — 特征提取】TextAdapter: 场景专项 SNR + Shannon 熵 + 废话熔断检测...' });
@@ -285,6 +333,8 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
     if (assetCategory === 'image' && !selectedImage)  return alert('请上传画作或选择 Demo 预设');
     if (assetCategory === 'audio' && !desc.trim() && !audioB64)
       return alert('请输入音频描述，或先录音/上传音频文件');
+    if (assetCategory === 'video' && !desc.trim())
+      return alert('请输入视频描述内容（Stage B 真实帧采样需上传视频文件）');
 
     if (isRecording) stopRecording();
 
@@ -300,8 +350,7 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
         cur++;
       } else {
         clearInterval(interval);
-        // 第 5 参数传 audioB64（文本/图像为 null）
-        setTimeout(() => onComplete(desc, assetCategory, enableZK, sceneOverride || null, audioB64 || null, imageB64 || null), 1200);
+        setTimeout(() => onComplete(desc, assetCategory, enableZK, sceneOverride || null, audioB64 || null, imageB64 || null, videoB64 || null), 1200);
       }
     }, 750);
   };
@@ -313,6 +362,7 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
   const presetColor = (preset) => {
     if (preset.category === 'image') return 'text-amber-500';
     if (preset.category === 'audio') return 'text-emerald-500';
+    if (preset.category === 'video') return 'text-violet-500';
     return 'text-blue-500';
   };
 
@@ -445,6 +495,62 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
               </div>
             )}
 
+            {/* ★ v5 视频输入区 */}
+            {assetCategory === 'video' && (
+              <div className="space-y-3">
+                {/* 上传区 */}
+                <div
+                  onClick={() => videoFileInputRef.current?.click()}
+                  className={`w-full h-24 bg-slate-950/50 border-2 border-dashed rounded-xl flex flex-col items-center justify-center cursor-pointer transition-colors ${videoFileName ? 'border-violet-500 bg-violet-900/10' : 'border-slate-700 hover:border-violet-500/60'}`}
+                >
+                  {videoFileName ? (
+                    <>
+                      <Film className="w-6 h-6 text-violet-400 mb-1" />
+                      <p className="text-xs text-violet-400 font-bold">✓ 视频已加载</p>
+                      <p className="text-[10px] text-violet-600 mt-0.5 truncate max-w-[220px]">
+                        {videoFileName}
+                        {videoMeta && <span className="ml-1 opacity-70">({(videoMeta.size / 1048576).toFixed(1)} MB)</span>}
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <UploadCloud className="w-6 h-6 text-slate-500 mb-1" />
+                      <p className="text-xs text-slate-300 font-bold">点击上传视频文件</p>
+                      <p className="text-[10px] text-slate-600 mt-0.5">MP4 / MOV / WEBM · Stage B 帧采样</p>
+                    </>
+                  )}
+                </div>
+                <input
+                  ref={videoFileInputRef}
+                  type="file"
+                  accept="video/mp4,video/quicktime,video/webm,video/avi,video/*"
+                  className="hidden"
+                  onChange={handleVideoFile}
+                />
+
+                {/* 视频描述 */}
+                <div>
+                  <p className="text-[10px] text-slate-500 mb-1.5 flex items-center gap-1">
+                    <Tag className="w-3 h-3" />
+                    描述视频内容/场景 <span className="text-violet-400">(必填·Stage A 代理 + Stage B 帧采样双通道)</span>
+                  </p>
+                  <textarea
+                    value={inputText}
+                    onChange={(e) => setInputText(e.target.value)}
+                    placeholder={"例: 4K电影级短片，专业摄影机，LOG调色，城市夜景空镜...\n或: 医疗手术纪录片 / 高校公开课讲解 / 日常 vlog 记录..."}
+                    className="w-full h-20 bg-slate-950/50 border border-slate-700 rounded-xl p-3 font-mono text-xs text-violet-400 placeholder-slate-600 focus:outline-none focus:border-violet-500 resize-none"
+                  />
+                </div>
+
+                {/* Stage 说明 */}
+                <div className="text-[10px] text-slate-600 bg-slate-950/50 rounded-lg px-3 py-2 border border-slate-800/60 font-mono leading-relaxed">
+                  <span className="text-violet-700">●</span> Stage B (有视频): OpenCV 均匀采样16帧 → CLIP ViT-B/32 → 时域多样性 + 镜头切换密度<br/>
+                  <span className="text-slate-700">●</span> Stage A (仅描述): 文字代理推断，精度受限，适合快速预估<br/>
+                  <span className="text-slate-600">  TEV 基础倍率: 500× · 场景权重: 图像分类器代理</span>
+                </div>
+              </div>
+            )}
+
             {/* ★ v4 音频输入区 */}
             {assetCategory === 'audio' && (
               <div className="space-y-3">
@@ -570,6 +676,10 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
                       {SCENE_OVERRIDE_OPTIONS.filter(o => o.group === 'audio').map(o =>
                         <option key={o.value} value={o.value}>{o.label}</option>)}
                     </optgroup>
+                    <optgroup label="── 视频场景 (v5 新增) ──">
+                      {SCENE_OVERRIDE_OPTIONS.filter(o => o.group === 'video').map(o =>
+                        <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </optgroup>
                   </select>
                   {isOverrideActive && (
                     <p className="text-[10px] text-amber-400 flex items-center gap-1">
@@ -586,6 +696,8 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
               className={`w-full py-3.5 font-black rounded-xl transition-all shadow-lg text-white text-sm
                 ${assetCategory === 'audio'
                   ? 'bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-700 hover:to-teal-600'
+                  : assetCategory === 'video'
+                  ? 'bg-gradient-to-r from-violet-600 to-purple-500 hover:from-violet-700 hover:to-purple-600'
                   : enableZK
                     ? 'bg-gradient-to-r from-purple-600 to-indigo-500 hover:from-purple-700 hover:to-indigo-600'
                     : 'bg-slate-700 hover:bg-slate-600'}
