@@ -35,3 +35,17 @@ soundfile==0.12.1            # 音频文件读写（WAV/FLAC/MP3）
 # ── 开发工具（生产环境可不装）────────────────────────────────
 httpx==0.27.2                # 测试 API 用
 python-dotenv==1.0.1         # 读取 .env 文件
+
+# ── 阶段 2：真实 AI 推理模型（按需安装）────────────────────────
+# ImageAdapter v3: CLIP 图像语义编码
+# pip install transformers torch torchvision  （CPU 约 2GB）
+# GPU 版: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# transformers>=4.40.0
+
+# AudioAdapter v2: Whisper 语音转录
+# pip install openai-whisper  （base 模型约 150MB）
+# 或更快的实现: pip install faster-whisper
+# openai-whisper>=20231117
+
+# 注意：以上两项不写入固定版本，避免 CPU/GPU 环境冲突。
+# 需要时手动安装，系统会自动检测并启用，未安装则静默降级。

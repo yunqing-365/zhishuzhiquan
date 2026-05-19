@@ -115,6 +115,43 @@ export const apiClient = {
   },
 
   /**
+   * 历史记录全文搜索（v2 新增，对应 storage.search_history）
+   * @param {string} q  搜索关键词
+   * @param {number} limit
+   */
+  async historySearch(q, limit = 20) {
+    const params = new URLSearchParams({ q, limit });
+    return apiFetch(`/api/history/search?${params}`, { method: 'GET' });
+  },
+
+  /**
+   * 删除单条历史记录（v2 新增，对应 DELETE /api/history/{id}）
+   * @param {number} id
+   */
+  async deleteHistory(id) {
+    return apiFetch(`/api/history/${id}`, { method: 'DELETE' });
+  },
+
+  /**
+   * 详细统计（v2 新增，对应 /api/stats）
+   * 返回: { stats: { total, avg_quality, by_modality, top_scenes }, top_assets, corpus_size }
+   */
+  async stats() {
+    return apiFetch('/api/stats', { method: 'GET' }, 5000);
+  },
+
+  /**
+   * Top-N 高价值资产排行榜（v2 新增，对应 /api/top）
+   * @param {number} limit
+   * @param {string} modality  按模态过滤（可选）
+   */
+  async topAssets(limit = 10, modality = '') {
+    const params = new URLSearchParams({ limit });
+    if (modality) params.set('modality', modality);
+    return apiFetch(`/api/top?${params}`, { method: 'GET' });
+  },
+
+  /**
    * 场景配置（前端场景选项动态化用）
    */
   async scenes() {

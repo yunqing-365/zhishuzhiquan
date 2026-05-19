@@ -72,6 +72,48 @@ try:
 except ImportError:
     HAS_SF = False
 
+# ── Whisper 懒加载（v2 新增：转录音频 → 联合文本打分）────────────
+# 支持 openai-whisper (pip install openai-whisper) 或 faster-whisper
+# 未安装时静默降级，行为与 v1 完全一致
+_whisper_model  = None
+_whisper_tried  = False
+_WHISPER_SIZE   = "base"   # tiny/base/small/medium/large-v3 可配置
+
+def _try_load_whisper():
+    """懒加载 Whisper，只尝试一次，失败后不再重试"""
+    global _whisper_model, _whisper_tried
+    if _whisper_tried:
+        return
+    _whisper_tried = True
+    try:
+        import whisper as _whisper
+        _whisper_model = _whisper.load_model(_WHISPER_SIZE)
+        print(f">> [AudioAdapter v2] Whisper {_WHISPER_SIZE} 加载成功 ✓")
+    except Exception as e:
+        print(f"!! [AudioAdapter v2] Whisper 未安装或加载失败 (降级 MFCC 模式): {e}")
+        _whisper_model = None
+
+
+def _whisper_transcribe(y: "np.ndarray", sr: int) -> Optional[str]:
+    """
+    用 Whisper 将音频转录为文本。
+    返回转录文本或 None（失败时）。
+    音频已是 float32 mono 16kHz（由 librosa 预处理）。
+    """
+    _try_load_whisper()
+    if _whisper_model is None or y is None:
+        return None
+    try:
+        import whisper as _whisper
+        import numpy as _np
+        # whisper.transcribe 接受 numpy array (float32, 16kHz)
+        result = _whisper_model.transcribe(y.astype(_np.float32), language=None, fp16=False)
+        text = result.get("text", "").strip()
+        return text if len(text) > 5 else None
+    except Exception as e:
+        print(f"!! [AudioAdapter v2] Whisper 转录失败: {e}")
+        return None
+
 from .base_adapter import BaseModalityAdapter
 
 # ── 延迟导入 scoring，避免循环 ──────────────────────────────────
@@ -432,22 +474,21 @@ class _AudioFeatureExtractor:
 
 class AudioAdapter(BaseModalityAdapter):
     """
-    音频模态适配器 v1
+    音频模态适配器 v2
+
+    v1 → v2 升级:
+      [核心] Whisper 转录 + 联合文本打分
+        - 对语音场景自动调用 Whisper 转录，成功则：
+          1. snr += 5.0 × 1.1（清晰度验证）
+          2. llm_value += min(15, len(text)/50)（内容价值加成）
+          3. _whisper_text 字段透传转录文本（供 oracle debug / 前端展示）
+        - 懒加载，失败静默降级，行为与 v1 完全一致。
+      [兼容] BaseModalityAdapter 接口不变，oracle_engine 无需修改。
 
     接受 AssetData:
       asset_category = "audio"
       description    = 音频描述文本 (辅助场景判断)
       audio_data     = base64 编码的音频文件 (WAV/MP3/FLAC/OGG，可选)
-
-    处理流程:
-      1. 解码 base64 音频 → waveform (librosa, 16kHz, mono)
-      2. 音频场景分类 (规则引擎 → DCASE 2023 6类)
-      3. 提取 6D 特征 (频谱熵, 感知SNR, Delta-MFCC结构, 稀缺度, llm_value, shapley)
-      4. 生成感知哈希 (能量帧指纹，抗变速/变调)
-
-    Fallback 策略:
-      若 librosa 不可用 或 audio_data 为空 → 以 description 文本代理估值
-      (约为满分的 50%，标注 fallback 模式)
     """
 
     _extractor = _AudioFeatureExtractor()
@@ -523,7 +564,8 @@ class AudioAdapter(BaseModalityAdapter):
         """
         from scoring import knn_shapley_score, unified_shapley_score
 
-        has_wave = False
+        has_wave    = False
+        whisper_txt = None   # v2: Whisper 转录结果
         y = sr = None
 
         if audio_data and HAS_LIBROSA:
@@ -531,6 +573,11 @@ class AudioAdapter(BaseModalityAdapter):
             if y_decoded is not None and len(y_decoded) > sr_decoded // 4:
                 y, sr     = y_decoded, sr_decoded
                 has_wave  = True
+                # ── v2 新增：Whisper 转录 ─────────────────────────────
+                # 仅对语音场景（非纯音乐/音效）尝试转录，节约计算
+                tev_scene_hint = scene_result.scene if scene_result else "general"
+                if tev_scene_hint in ("medical_sft", "legal_doc", "chat_qa", "general"):
+                    whisper_txt = _whisper_transcribe(y, sr)
 
         # ── 音频场景 (独立于 oracle 场景分类器) ──────────────────
         # 从 scene_result 取已分类的 tev_scene
@@ -585,6 +632,17 @@ class AudioAdapter(BaseModalityAdapter):
             + shapley_score       * 0.10
         ) * (0.60 + 0.40 * dur_factor)
 
+        # ── v2: Whisper 联合加成 ──────────────────────────────────
+        # 如果 Whisper 成功转录，说明语音清晰度高，且提供真实文本内容
+        whisper_bonus = 0.0
+        if whisper_txt:
+            txt_len     = len(whisper_txt)
+            # 转录字数奖励：每 50 字加 1 分，上限 15 分
+            whisper_bonus = min(15.0, txt_len / 50.0)
+            # snr 提升：成功转录意味着 Whisper 能处理，语音质量可用
+            snr = min(100.0, snr * 1.1 + 5.0)
+            llm_value = min(100.0, llm_value + whisper_bonus)
+
         return {
             "entropy":   round(min(100.0, max(0.0, entropy)),   1),
             "snr":       round(min(100.0, max(0.0, snr)),       1),
@@ -596,6 +654,9 @@ class AudioAdapter(BaseModalityAdapter):
             "_audio_scene":       audio_scene,
             "_shapley_conf":      round(shapley_conf, 3),
             "_has_wave":          has_wave,
+            # v2 新增私有字段
+            "_whisper_text":      whisper_txt[:200] if whisper_txt else None,
+            "_whisper_bonus":     round(whisper_bonus, 1),
         }
 
     # ----------------------------------------------------------------

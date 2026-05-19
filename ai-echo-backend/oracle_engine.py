@@ -414,6 +414,19 @@ async def valuate(asset: AssetData):
             "shapley_confidence": round(shapley_conf, 3),
             "vector_distance":  vector_distance,   # ★ v5: 真实稀缺度（非随机）
             "corpus_size":      _collection.count(),
+            # ★ v3/v2 适配器私有字段透传（仅当存在时）
+            **(
+                {"semantic_snr": features["_semantic_snr"], "rule_snr": features["_rule_snr"]}
+                if "_semantic_snr" in features else {}
+            ),
+            **(
+                {"clip_aesthetic": features["_clip_aesthetic"], "clip_available": features["_clip_available"]}
+                if "_clip_available" in features else {}
+            ),
+            **(
+                {"whisper_text": features["_whisper_text"], "whisper_bonus": features["_whisper_bonus"]}
+                if "_whisper_text" in features and features["_whisper_text"] else {}
+            ),
         },
     }
 
@@ -511,6 +524,31 @@ async def delete_history(row_id: int):
         from fastapi import HTTPException
         raise HTTPException(status_code=404, detail=f"记录 #{row_id} 不存在或删除失败")
     return {"deleted": True, "id": row_id}
+
+
+@app.get("/api/stats")
+async def stats():
+    """
+    详细统计端点（v2 新增）
+    返回：按模态/场景分组统计 + Top-10 高价值资产
+    供前端 HistoryPanel StatBar 展示和排行榜使用
+    """
+    from storage import get_modality_stats, get_top_assets
+    detail = get_modality_stats()
+    top    = get_top_assets(limit=10)
+    return {
+        "stats": detail,
+        "top_assets": top,
+        "corpus_size": _collection.count(),
+    }
+
+
+@app.get("/api/top")
+async def top_assets(limit: int = 10, modality: str = ""):
+    """Top-N 高价值资产排行榜（按动态报价降序）"""
+    from storage import get_top_assets
+    assets = get_top_assets(limit=min(limit, 50), modality=modality or None)
+    return {"assets": assets, "total": len(assets)}
 
 
 if __name__ == "__main__":
