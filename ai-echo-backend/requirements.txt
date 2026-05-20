@@ -55,6 +55,13 @@ python-dotenv==1.0.1         # 读取 .env 文件
 # 或桌面环境: pip install opencv-python
 # opencv-python-headless>=4.8.0
 
+# VideoAdapter v2: Stage C 双流推理 — 音频流提取（系统级依赖）
+# 安装 ffmpeg（Stage C 音轨提取，无需 Python 包）:
+#   Ubuntu/Debian: sudo apt-get install -y ffmpeg
+#   macOS:         brew install ffmpeg
+#   Windows:       choco install ffmpeg  或手动加入 PATH
+# 未安装 ffmpeg 时 VideoAdapter 自动降级到 Stage B（纯视觉流），不影响其他模态
+
 # 图像感知哈希（ImageAdapter + VideoAdapter）
 # pip install ImageHash
 # ImageHash>=4.3.1

@@ -4,6 +4,7 @@ import {
   Image as ImageIcon, FileText, Tag, ChevronDown, ChevronUp,
   FlaskConical, Mic, StopCircle, Waveform, Film, History,
 } from 'lucide-react';
+import { apiClient } from './api';
 
 // ─── Demo 预设（★ v4: 补充音频场景）────────────────────────────────────
 const DEMO_PRESETS = [
@@ -67,33 +68,70 @@ const DEMO_PRESETS = [
 ];
 
 // ─── 场景覆盖选项（★ v4: 补充音频细粒度场景）───────────────────────────
-const SCENE_OVERRIDE_OPTIONS = [
+// ─── 场景图标映射 ──────────────────────────────────────────────────
+const SCENE_ICONS = {
+  medical_sft:     '🏥', legal_doc:       '⚖️',  code_tech:       '💻',
+  creative:        '✍️',  chat_qa:         '💬', general:         '🔧',
+  illustration:    '🎨', photo:           '📷', diagram:         '📊',
+  screenshot:      '🖥️',  noise:           '🚫',
+  speech_medical:  '🏥', speech_legal:    '⚖️',  speech_edu:      '📚',
+  music_original:  '🎵', ambient_sfx:     '🌿',
+  documentary:     '📹', lecture:         '🎓', cinematic:       '🎬',
+  sports_action:   '⚽', vlog:            '📱',
+  // 旧版前端键名兼容
+  vid_cinematic:   '🎬', vid_doc:         '📹', vid_edu:         '🎓',
+  vid_user_gen:    '📱',
+};
+
+// ─── 静态兜底数据（后端未就绪时使用）─────────────────────────────
+const _FALLBACK_SCENE_OPTIONS = [
   { value: '',              label: '🤖 自动识别 (推荐)',    group: 'auto'  },
-  // 文本场景
   { value: 'medical_sft',  label: '🏥 医疗 SFT  ×1.35',   group: 'text'  },
   { value: 'legal_doc',    label: '⚖️  法律文书  ×1.20',   group: 'text'  },
   { value: 'code_tech',    label: '💻 代码技术  ×1.10',   group: 'text'  },
   { value: 'creative',     label: '✍️  创意写作  ×0.90',   group: 'text'  },
   { value: 'chat_qa',      label: '💬 问答对话  ×0.80',   group: 'text'  },
-  // 图像场景
   { value: 'illustration', label: '🎨 原创插画  ×1.50',   group: 'image' },
   { value: 'photo',        label: '📷 摄影作品  ×1.00',   group: 'image' },
   { value: 'diagram',      label: '📊 图表图解  ×0.55',   group: 'image' },
   { value: 'screenshot',   label: '🖥️  截图素材  ×0.25',   group: 'image' },
-  // ★ v4 音频细粒度场景
   { value: 'speech_medical', label: '🏥 医疗语音  ×1.40', group: 'audio' },
   { value: 'speech_legal',   label: '⚖️  法律语音  ×1.25', group: 'audio' },
   { value: 'speech_edu',     label: '📚 教育语音  ×0.85', group: 'audio' },
   { value: 'music_original', label: '🎵 原创音乐  ×1.10', group: 'audio' },
   { value: 'ambient_sfx',    label: '🌿 环境音效  ×0.60', group: 'audio' },
   { value: 'noise',          label: '🚫 噪声/废话  ×0.05', group: 'audio' },
-
-  // ── 视频场景 ──
-  { value: 'vid_cinematic', label: '🎬 影视创作  ×8.0',  group: 'video' },
-  { value: 'vid_doc',       label: '📹 纪录/访谈  ×6.0',  group: 'video' },
-  { value: 'vid_edu',       label: '🎓 教学讲解  ×5.5',  group: 'video' },
-  { value: 'vid_user_gen',  label: '📱 日常记录  ×3.0',  group: 'video' },
+  { value: 'documentary',  label: '📹 纪录/访谈  ×1.40',  group: 'video' },
+  { value: 'lecture',       label: '🎓 教学讲解  ×1.30',  group: 'video' },
+  { value: 'cinematic',     label: '🎬 影视创作  ×1.20',  group: 'video' },
+  { value: 'sports_action', label: '⚽ 运动/动作  ×0.90',  group: 'video' },
+  { value: 'vlog',          label: '📱 个人 vlog  ×0.65',  group: 'video' },
 ];
+
+/**
+ * 将 /api/scenes 响应转换为 SCENE_OVERRIDE_OPTIONS 格式
+ * 支持: text_scenes / image_scenes / audio_scenes / video_scene_weights
+ */
+function buildSceneOptions(scenesData) {
+  if (!scenesData) return _FALLBACK_SCENE_OPTIONS;
+  const options = [{ value: '', label: '🤖 自动识别 (推荐)', group: 'auto' }];
+
+  const addGroup = (weights, group) => {
+    if (!weights || typeof weights !== 'object') return;
+    Object.entries(weights).forEach(([key, weight]) => {
+      const icon  = SCENE_ICONS[key] || '🔧';
+      const label = `${icon} ${key}  ×${weight}`;
+      options.push({ value: key, label, group, weight });
+    });
+  };
+
+  addGroup(scenesData.text_scenes,        'text');
+  addGroup(scenesData.image_scenes,       'image');
+  addGroup(scenesData.audio_scenes,       'audio');
+  addGroup(scenesData.video_scene_weights,'video');
+
+  return options.length > 1 ? options : _FALLBACK_SCENE_OPTIONS;
+}
 
 // ─── 波形可视化组件（仅在有 AudioContext 时渲染）──────────────────────
 const WaveformCanvas = ({ analyserRef, isRecording }) => {
@@ -151,6 +189,11 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
   const [sceneOverride, setSceneOverride] = useState('');
   const [showDebug, setShowDebug]       = useState(false);
 
+  // ★ v6: 动态场景配置（从 /api/scenes 加载）
+  const [sceneOptions, setSceneOptions]     = useState(_FALLBACK_SCENE_OPTIONS);
+  const [scenesLoaded, setScenesLoaded]     = useState(false);
+  const [dualStreamInfo, setDualStreamInfo] = useState(null);  // Stage C 双流信息
+
   // ★ v4 音频状态
   const [isRecording, setIsRecording]   = useState(false);
   const [audioB64, setAudioB64]         = useState(null);       // base64 wav
@@ -170,6 +213,27 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
   const timerRef           = useRef(null);
   const fileInputRef       = useRef(null);
   const videoFileInputRef  = useRef(null);
+
+  // ★ v6: 从 /api/scenes 动态加载场景权重 ──────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+    apiClient.scenes()
+      .then(data => {
+        if (cancelled) return;
+        const opts = buildSceneOptions(data);
+        setSceneOptions(opts);
+        setScenesLoaded(true);
+        // 提取 Stage C 双流推理信息
+        if (data?.video_dual_stream) {
+          setDualStreamInfo(data.video_dual_stream);
+        }
+      })
+      .catch(() => {
+        // 后端未启动时静默使用 fallback，不影响主流程
+        if (!cancelled) setScenesLoaded(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   // ─ 清理录音资源
   const stopRecording = useCallback(() => {
@@ -355,7 +419,7 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
     }, 750);
   };
 
-  const overrideLabel    = SCENE_OVERRIDE_OPTIONS.find(o => o.value === sceneOverride)?.label || '🤖 自动识别';
+  const overrideLabel    = sceneOptions.find(o => o.value === sceneOverride)?.label || '🤖 自动识别';
   const isOverrideActive = Boolean(sceneOverride);
 
   // 音频 preset 仅在音频标签下高亮
@@ -651,9 +715,20 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
 
               {showDebug && (
                 <div className="p-3 bg-slate-950/70 border-t border-slate-800 space-y-2">
-                  <p className="text-[10px] text-slate-500">
-                    强制指定场景类型，绕过 SceneClassifier v4 双通道推理。用于测试音频细粒度定价路径。
-                  </p>
+                  <div className="flex items-center justify-between">
+                    <p className="text-[10px] text-slate-500">
+                      强制指定场景类型，绕过 SceneClassifier v4 双通道推理。用于测试音频细粒度定价路径。
+                    </p>
+                    {scenesLoaded ? (
+                      <span className="ml-2 flex-shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono bg-emerald-900/50 text-emerald-400 border border-emerald-700/40">
+                        ⚡ 动态
+                      </span>
+                    ) : (
+                      <span className="ml-2 flex-shrink-0 px-1.5 py-0.5 rounded text-[9px] font-mono bg-slate-800 text-slate-500 border border-slate-700">
+                        静态兜底
+                      </span>
+                    )}
+                  </div>
                   <select
                     value={sceneOverride}
                     onChange={(e) => setSceneOverride(e.target.value)}
@@ -661,23 +736,23 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
                   >
                     {/* 按 group 分组展示 */}
                     <optgroup label="── 自动 ──">
-                      {SCENE_OVERRIDE_OPTIONS.filter(o => o.group === 'auto').map(o =>
+                      {sceneOptions.filter(o => o.group === 'auto').map(o =>
                         <option key={o.value} value={o.value}>{o.label}</option>)}
                     </optgroup>
                     <optgroup label="── 文本场景 ──">
-                      {SCENE_OVERRIDE_OPTIONS.filter(o => o.group === 'text').map(o =>
+                      {sceneOptions.filter(o => o.group === 'text').map(o =>
                         <option key={o.value} value={o.value}>{o.label}</option>)}
                     </optgroup>
                     <optgroup label="── 图像场景 ──">
-                      {SCENE_OVERRIDE_OPTIONS.filter(o => o.group === 'image').map(o =>
+                      {sceneOptions.filter(o => o.group === 'image').map(o =>
                         <option key={o.value} value={o.value}>{o.label}</option>)}
                     </optgroup>
-                    <optgroup label="── 音频细粒度场景 (v4 新增) ──">
-                      {SCENE_OVERRIDE_OPTIONS.filter(o => o.group === 'audio').map(o =>
+                    <optgroup label="── 音频细粒度场景 (v4) ──">
+                      {sceneOptions.filter(o => o.group === 'audio').map(o =>
                         <option key={o.value} value={o.value}>{o.label}</option>)}
                     </optgroup>
-                    <optgroup label="── 视频场景 (v5 新增) ──">
-                      {SCENE_OVERRIDE_OPTIONS.filter(o => o.group === 'video').map(o =>
+                    <optgroup label="── 视频场景 (v5) ──">
+                      {sceneOptions.filter(o => o.group === 'video').map(o =>
                         <option key={o.value} value={o.value}>{o.label}</option>)}
                     </optgroup>
                   </select>
@@ -685,6 +760,24 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
                     <p className="text-[10px] text-amber-400 flex items-center gap-1">
                       ⚠ 场景覆盖已激活，将跳过 SceneClassifier v4 的 dual-channel fusion 推理
                     </p>
+                  )}
+                  {/* Stage C 双流推理状态徽标 */}
+                  {assetCategory === 'video' && dualStreamInfo && (
+                    <div className="mt-1 p-2 rounded-lg bg-purple-950/40 border border-purple-700/30 text-[10px] font-mono">
+                      <div className="flex items-center gap-1.5 text-purple-300 font-semibold mb-0.5">
+                        <span>🎬</span>
+                        <span>VideoAdapter Stage {dualStreamInfo.stage} 双流推理</span>
+                        {dualStreamInfo.ffmpeg_available
+                          ? <span className="ml-auto text-emerald-400">ffmpeg ✓</span>
+                          : <span className="ml-auto text-amber-400">ffmpeg 未安装 (纯视觉)</span>
+                        }
+                      </div>
+                      {dualStreamInfo.ffmpeg_available && (
+                        <div className="text-slate-400">
+                          视觉流 α={dualStreamInfo.fusion_alpha} · 音频流 β={dualStreamInfo.fusion_beta}
+                        </div>
+                      )}
+                    </div>
                   )}
                 </div>
               )}

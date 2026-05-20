@@ -492,22 +492,40 @@ async def list_scenes():
         TEXT_SCENE_WEIGHTS, IMAGE_SCENE_WEIGHTS,
         AUDIO_SCENE_WEIGHTS, AUDIO_SCENE_TO_TEV,
         VIDEO_SCENE_WEIGHTS, VIDEO_SCENE_TO_TEV,
+        VIDEO_SCENE_COMPOSITE_WEIGHTS,
     )
     from scoring import AMM_SCENE_CONFIG
+    from adapters.video_adapter import HAS_FFMPEG, _FUSION_ALPHA_DEFAULT, _FUSION_BETA_DEFAULT
+
     return {
         "supported_modalities": {
-            k: {"label": v.label, "tev": v.tev, "adapter_version": v.adapter_version}
+            k: {
+                "label":           v.label,
+                "tev":             v.tev,
+                "adapter_version": v.adapter_version,
+                "is_stub":         getattr(v.adapter, "IS_STUB", False),
+            }
             for k, v in _registry.items()
         },
+        # ── 场景权重表（前端动态加载用）
         "text_scenes":       TEXT_SCENE_WEIGHTS,
         "image_scenes":      IMAGE_SCENE_WEIGHTS,
-        "audio_scenes":      AUDIO_SCENE_WEIGHTS,        # ★ v4: 音频细粒度场景权重
-        "audio_scene_to_tev": AUDIO_SCENE_TO_TEV,        # ★ v4: 前端场景映射表
-        "video_scene_weights": VIDEO_SCENE_WEIGHTS,        # ★ v5: 视频场景权重表
-        "video_scene_to_tev":  VIDEO_SCENE_TO_TEV,         # ★ v5: 视频场景 TEV 映射
+        "audio_scenes":      AUDIO_SCENE_WEIGHTS,
+        "audio_scene_to_tev": AUDIO_SCENE_TO_TEV,
+        "video_scene_weights": VIDEO_SCENE_WEIGHTS,
+        "video_scene_to_tev":  VIDEO_SCENE_TO_TEV,
+        "video_scene_composite_weights": VIDEO_SCENE_COMPOSITE_WEIGHTS,
         "modality_tev":      MODALITY_TEV,
         "amm_scene_config":  AMM_SCENE_CONFIG,
-        "domain_demand":     DOMAIN_DEMAND,              # 向后兼容
+        "domain_demand":     DOMAIN_DEMAND,
+        # ── Stage C 双流推理运行时信息
+        "video_dual_stream": {
+            "stage":            "C",
+            "ffmpeg_available": HAS_FFMPEG,
+            "fusion_alpha":     _FUSION_ALPHA_DEFAULT,
+            "fusion_beta":      _FUSION_BETA_DEFAULT,
+            "description":      "视觉流(CLIP) + 音频流(AudioAdapter) 加权融合",
+        },
     }
 
 

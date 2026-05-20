@@ -1,32 +1,41 @@
 """
-VideoAdapter — 视频模态适配器 v1 (Stage B)
+VideoAdapter — 视频模态适配器 v2 (Stage C)
 ==========================================
-v0 (Stage A) → v1 (Stage B) 升级:
+v1 (Stage B) → v2 (Stage C) 升级:
 
-  [核心] 真实帧采样 + CLIP per-frame 视觉编码
-    - 接受 base64 编码的视频文件（MP4/AVI/MOV/WebM）
-    - 使用 OpenCV 均匀采样最多 16 帧（不超过 30s 间隔）
-    - 每帧调用 CLIP ViT-B/32 提取 512-dim 图像特征
-    - 时序聚合：mean + std → 时域平均特征 + 时域变化率
-    - PCA 投影 512→384 与 ChromaDB SentenceTransformer 维度对齐
-    - 感知哈希：各帧 pHash 拼接后 SHA-256，抗重编码鲁棒
+  [核心] 双流推理 (Dual-Stream Inference)
+    视觉流 (继承 Stage B):
+      - OpenCV 均匀采样最多 16 帧
+      - CLIP ViT-B/32 per-frame 编码 → 512-dim
+      - 时序聚合: mean + std；镜头切换密度；PCA 投影 512→384
 
-  [新增] 镜头切换密度检测
-    - 相邻帧 CLIP 余弦距离 > 阈值 → 判定为镜头切换
-    - 镜头切换密度 → structure 维度（取代描述文字代理）
+    音频流 (Stage C 新增):
+      - subprocess ffmpeg 提取视频音轨 → 临时 WAV (16kHz mono)
+      - 调用 AudioAdapter 核心方法提取 6D 音频特征
+      - 无 ffmpeg / 无音轨时静默降级，视觉流结果不受影响
 
-  [新增] 时域多样性（temporal diversity）
-    - 帧特征方差均值 → 反映内容变化丰富度
-    - 高方差 = 场景切换频繁 / 信息密度大 → 训练价值高
+  [融合策略] StreamFusion
+    - 视觉流权重 α = 0.60，音频流权重 β = 0.40
+    - 维度级融合: merged[dim] = α × video[dim] + β × audio[dim]
+    - entropy:   视觉时域多样性 × α + 音频频谱熵 × β
+    - snr:       CLIP 美学分    × α + 音频感知信噪比 × β
+    - structure: 镜头切换密度   × α + Delta-MFCC 结构 × β
+    - scarcity / shapley:  视觉流主导（音频辅助）
+    - llm_value: 融合后加权均值
 
-  [降级] 无 video_data 或 OpenCV/CLIP 未安装时
-    - 自动回退到 Stage A 描述文字代理，行为与 v0 完全一致
-    - IS_STUB = True 仅当 OpenCV 未安装时置位
+  [诊断字段] (带 _ 前缀，不计入估值)
+    _has_audio_stream: bool   — 音频流是否成功提取
+    _audio_scene:      str    — 音频场景分类结果
+    _fusion_alpha:     float  — 实际视觉流权重
+    _whisper_text:     str    — Whisper 转录片段（如可用）
+
+  [降级] 无 video_data 或 OpenCV 未安装 → Stage A 描述代理
+         音频流失败 → 纯视觉流 (α=1.0)，与 Stage B 一致
 
 升级路径:
   Stage A (v0): 描述文字代理
-  Stage B (v1): OpenCV 帧采样 + CLIP per-frame ← 当前版本
-  Stage C (v2): 音轨 → AudioAdapter 联合估值（双流）
+  Stage B (v1): OpenCV 帧采样 + CLIP per-frame
+  Stage C (v2): 音轨提取 → AudioAdapter 双流融合 ← 当前版本
   Stage D (v3): VideoMAE / TimeSformer 时序理解
 """
 
@@ -36,6 +45,8 @@ import base64
 import hashlib
 import tempfile
 import os
+import subprocess
+import shutil
 from typing import List, Dict, Optional, Tuple
 
 import numpy as np
@@ -48,6 +59,10 @@ try:
     HAS_CV2 = True
 except ImportError:
     HAS_CV2 = False
+
+# ── ffmpeg 可用性检测（音频流提取）────────────────────────────────
+_FFMPEG_BIN: Optional[str] = shutil.which("ffmpeg")
+HAS_FFMPEG = _FFMPEG_BIN is not None
 
 try:
     from scoring import knn_shapley_score
@@ -67,6 +82,23 @@ _MAX_FRAMES        = 16
 _MIN_FRAME_GAP_S   = 1.0
 _SCENE_CUT_THRESH  = 0.35
 _EMBED_DIM         = 384
+
+# ── 双流融合权重 (Stage C) ──────────────────────────────────────────
+# 视觉流主导(α)，音频流辅助(β)；有音频时使用，无音频时 α=1.0
+_FUSION_ALPHA_DEFAULT = 0.60   # 视觉流权重
+_FUSION_BETA_DEFAULT  = 0.40   # 音频流权重
+
+# 各维度融合系数（视觉流贡献度，音频流 = 1 - 对应值）
+# snr: 视觉质量（CLIP 美学）与音频质量各占比
+# structure: 镜头切换密度 vs Delta-MFCC 结构
+_DIM_ALPHA: Dict[str, float] = {
+    "entropy":   0.55,   # 时域多样性 vs 频谱熵
+    "snr":       0.55,   # CLIP 美学  vs 感知 SNR
+    "structure": 0.50,   # 镜头切换  vs 时频结构（平权）
+    "scarcity":  0.70,   # 视觉空间稀缺主导
+    "llm_value": 0.60,
+    "shapley":   0.65,
+}
 
 _HIGH_KWS = frozenset([
     "4k", "8k", "uhd", "高清", "专业", "纪录片", "电影级",
@@ -217,15 +249,157 @@ def _temporal_diversity(frame_feats: np.ndarray) -> float:
     return round(min(100.0, mean_var / 0.05 * 100), 1)
 
 
+# ===================================================================
+# Stage C: 音频流提取 & 双流融合
+# ===================================================================
+
+def _extract_audio_from_video(video_path: str) -> Optional[str]:
+    """
+    用 ffmpeg 从视频文件提取音轨，输出 16kHz mono WAV。
+    返回临时 WAV 文件路径，调用方负责 unlink；失败时返回 None。
+
+    命令: ffmpeg -i <video> -vn -ar 16000 -ac 1 -f wav <out.wav> -y -loglevel error
+    """
+    if not HAS_FFMPEG:
+        return None
+    try:
+        tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tmp.close()
+        cmd = [
+            _FFMPEG_BIN,
+            "-i", video_path,
+            "-vn",               # 丢弃视频流
+            "-ar", "16000",      # 16 kHz（ASR 标准）
+            "-ac", "1",          # mono
+            "-f", "wav",
+            tmp.name,
+            "-y",
+            "-loglevel", "error",
+        ]
+        result = subprocess.run(cmd, timeout=60, capture_output=True)
+        if result.returncode != 0 or not os.path.exists(tmp.name):
+            os.unlink(tmp.name)
+            return None
+        # 空音轨检测（< 1KB）
+        if os.path.getsize(tmp.name) < 1024:
+            os.unlink(tmp.name)
+            return None
+        return tmp.name
+    except Exception as e:
+        print(f"!! [VideoAdapter v2] ffmpeg 音频提取失败: {e}")
+        try:
+            os.unlink(tmp.name)
+        except Exception:
+            pass
+        return None
+
+
+def _wav_path_to_b64(wav_path: str) -> Optional[str]:
+    """将 WAV 文件读取为 base64 字符串（供 AudioAdapter 接口使用）"""
+    try:
+        with open(wav_path, "rb") as f:
+            return base64.b64encode(f.read()).decode("ascii")
+    except Exception:
+        return None
+
+
+def _extract_audio_metrics(
+    video_path: str,
+    description: str,
+    scene_result,
+    vector_distance: float,
+    query_embedding: List[float],
+    embed_fn,
+    get_corpus_fn,
+) -> Optional[Dict]:
+    """
+    Stage C 音频流: 提取视频音轨 → AudioAdapter.extract_metrics()
+    返回 6D 指标 dict，或 None（无音轨 / 依赖未安装）。
+    """
+    try:
+        from .audio_adapter import AudioAdapter, HAS_LIBROSA
+        if not HAS_LIBROSA:
+            return None
+
+        wav_path = _extract_audio_from_video(video_path)
+        if wav_path is None:
+            return None
+
+        try:
+            audio_b64  = _wav_path_to_b64(wav_path)
+            if audio_b64 is None:
+                return None
+
+            audio_adapter = AudioAdapter(embed_fn, get_corpus_fn)
+            metrics = audio_adapter.extract_metrics(
+                asset_data=description,
+                scene_result=scene_result,
+                vector_distance=vector_distance,
+                query_embedding=query_embedding,
+                audio_data=audio_b64,
+            )
+            return metrics
+        finally:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
+    except Exception as e:
+        print(f"!! [VideoAdapter v2] 音频流推理失败: {e}")
+        return None
+
+
+def _fuse_streams(
+    video_metrics: Dict,
+    audio_metrics: Optional[Dict],
+    alpha: float = _FUSION_ALPHA_DEFAULT,
+) -> Dict:
+    """
+    双流融合: video × α + audio × (1-α)，维度级可配置权重。
+    audio_metrics=None 时退化为纯视觉流 (α=1.0)。
+    """
+    if audio_metrics is None:
+        return video_metrics
+
+    fused = {}
+    dims = ["entropy", "snr", "structure", "scarcity", "llm_value", "shapley"]
+    for dim in dims:
+        v_val = float(video_metrics.get(dim, 0.0))
+        a_val = float(audio_metrics.get(dim, 0.0))
+        w     = _DIM_ALPHA.get(dim, alpha)
+        fused[dim] = round(min(100.0, w * v_val + (1.0 - w) * a_val), 1)
+
+    # 保留所有视觉流诊断字段（带 _ 前缀）
+    for k, v in video_metrics.items():
+        if k.startswith("_"):
+            fused[k] = v
+
+    # 注入音频流诊断字段
+    fused["_has_audio_stream"]  = True
+    fused["_audio_snr"]         = audio_metrics.get("snr")
+    fused["_audio_entropy"]     = audio_metrics.get("entropy")
+    fused["_audio_scene"]       = audio_metrics.get("_audio_scene")
+    fused["_whisper_text"]      = audio_metrics.get("_whisper_text")
+    fused["_fusion_alpha"]      = round(alpha, 2)
+    fused["_shapley_confidence"] = round(
+        max(
+            float(video_metrics.get("_shapley_confidence", 0.5)),
+            0.85,    # 双流成功 → 置信度提升到 0.85
+        ),
+        3,
+    )
+    return fused
+
+
 class VideoAdapter(BaseModalityAdapter):
     """
-    视频模态适配器 v1 — Stage B: OpenCV 帧采样 + CLIP per-frame
+    视频模态适配器 v2 — Stage C: 双流推理 (视觉 + 音频)
 
     IS_STUB = True 仅当 OpenCV 未安装（帧采样不可用）。
-    CLIP 未装时自动降级到 Stage A，IS_STUB 不变。
+    CLIP / ffmpeg / librosa 未安装时各自静默降级，IS_STUB 不变。
     """
 
-    ADAPTER_VERSION = "v1-stage-b"
+    ADAPTER_VERSION = "v2-stage-c"
     IS_STUB = not HAS_CV2
 
     def __init__(self, embed_fn, get_corpus_fn):
@@ -295,6 +469,7 @@ class VideoAdapter(BaseModalityAdapter):
         aesthetic   = -1.0
         n_frames    = 0
         duration_s  = 0.0
+        tmp_path    = None   # Stage C: 复用给音频流
 
         if video_data and HAS_CV2:
             tmp_path = _decode_video_b64(video_data)
@@ -308,11 +483,8 @@ class VideoAdapter(BaseModalityAdapter):
                         frame_feats = _clip_frame_features(frames)
                         clip_ok     = frame_feats is not None
                         aesthetic   = _clip_aesthetic_batch(frames) if clip_ok else -1.0
-                finally:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
+                except Exception as e:
+                    print(f"!! [VideoAdapter v2] 视觉流提取异常: {e}")
 
         if has_video and clip_ok and frame_feats is not None:
             entropy   = _temporal_diversity(frame_feats)
@@ -352,29 +524,55 @@ class VideoAdapter(BaseModalityAdapter):
             + shapley   * 0.20
         ) * (0.50 + 0.50 * dur_factor)
 
-        return {
+        video_metrics = {
             "entropy":   round(min(100.0, entropy), 1),
             "snr":       round(min(100.0, snr), 1),
             "structure": round(min(100.0, structure), 1),
             "scarcity":  round(min(100.0, scarcity), 1),
             "llm_value": round(min(100.0, llm_value), 1),
             "shapley":   round(shapley, 1),
-            "_clip_available":    clip_ok,
-            "_clip_aesthetic":    round(aesthetic, 1) if aesthetic >= 0 else None,
-            "_has_video":         has_video,
-            "_n_frames":          n_frames,
-            "_duration_s":        round(duration_s, 1),
+            "_clip_available":     clip_ok,
+            "_clip_aesthetic":     round(aesthetic, 1) if aesthetic >= 0 else None,
+            "_has_video":          has_video,
+            "_n_frames":           n_frames,
+            "_duration_s":         round(duration_s, 1),
             "_shapley_confidence": round(shapley_confidence, 3),
+            "_has_audio_stream":   False,   # 默认无音频流，下方可能覆盖
         }
+
+        # ── Stage C: 音频流双流推理 ─────────────────────────────────
+        # 仅在视觉流成功（has_video）且 ffmpeg 可用时尝试
+        audio_metrics = None
+        if has_video and tmp_path and HAS_FFMPEG:
+            audio_metrics = _extract_audio_metrics(
+                video_path=tmp_path,
+                description=asset_data,
+                scene_result=scene_result,
+                vector_distance=vector_distance,
+                query_embedding=query_embedding,
+                embed_fn=self._embed_fn,
+                get_corpus_fn=self._get_corpus,
+            )
+
+        # 清理临时视频文件
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+        # 融合两路特征（audio_metrics=None 时退化为纯视觉流）
+        return _fuse_streams(video_metrics, audio_metrics)
 
     def get_metric_names(self) -> List[str]:
         if HAS_CV2:
+            audio_suffix = " + 音频流" if HAS_FFMPEG else ""
             return [
-                "帧时域多样性 (CLIP temporal diversity)",
-                "CLIP 帧美学分 (cinematic quality)",
-                "镜头切换密度 (scene complexity)",
+                f"帧时域多样性 (CLIP temporal diversity{audio_suffix})",
+                f"CLIP 帧美学分 / 音频感知 SNR (双流融合)" if HAS_FFMPEG else "CLIP 帧美学分 (cinematic quality)",
+                f"镜头切换密度 / 时频结构 (双流融合)" if HAS_FFMPEG else "镜头切换密度 (scene complexity)",
                 "视频库稀缺度 (CLIP frame space)",
-                "多帧训练增益 (VideoLLM alignment)",
+                f"多帧+音轨训练增益 (VideoLLM × AudioLM)" if HAS_FFMPEG else "多帧训练增益 (VideoLLM alignment)",
                 "KNN-Shapley 贡献度",
             ]
         return [
