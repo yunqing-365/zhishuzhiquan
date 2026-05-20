@@ -66,6 +66,30 @@ async function apiFetch(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   }
 }
 
+// ── 指数退避重试（TIMEOUT / NETWORK 类型自动重试，SERVER 类不重试）──
+async function withRetry(fn, retries = 2) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isRetryable = err instanceof ApiError && err.type !== 'SERVER';
+      if (attempt === retries || !isRetryable) throw err;
+      const delay = 300 * Math.pow(2, attempt);   // 300ms, 600ms
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
+// ── 请求去重 Map（同 key 的并发请求合并为一次）──────────────────────
+const _inflight = new Map();
+
+async function dedupe(key, fn) {
+  if (_inflight.has(key)) return _inflight.get(key);
+  const promise = fn().finally(() => _inflight.delete(key));
+  _inflight.set(key, promise);
+  return promise;
+}
+
 // ── API 方法集合 ───────────────────────────────────────────────────
 export const apiClient = {
 
@@ -74,7 +98,9 @@ export const apiClient = {
    * 返回: { status, version, corpus_size, db_stats, ... }
    */
   async health() {
-    return apiFetch('/api/health', { method: 'GET' }, 3000);
+    return dedupe('health', () =>
+      withRetry(() => apiFetch('/api/health', { method: 'GET' }, 3000), 1)
+    );
   },
 
   /**
@@ -89,11 +115,21 @@ export const apiClient = {
    *   - video_data: base64 string | null  (★ v5: MP4/MOV/WEBM, VideoAdapter Stage B)
    * 返回: valuationResult 对象（与 OracleValuationScreen 期待格式完全对齐）
    */
+  /**
+   * 估值超时设置：
+   *   text/image — 8s（DEFAULT_TIMEOUT_MS）
+   *   audio/video — 30s（模型加载 + 帧采样较慢）
+   */
   async valuate(payload) {
-    return apiFetch('/api/valuate', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }, DEFAULT_TIMEOUT_MS);
+    const heavy = ['audio', 'video'].includes(payload.asset_category);
+    const timeout = heavy ? 30_000 : DEFAULT_TIMEOUT_MS;
+    return withRetry(
+      () => apiFetch('/api/valuate', {
+        method: 'POST',
+        body:   JSON.stringify(payload),
+      }, timeout),
+      1   // 重试 1 次（估值最多尝试 2 次，避免重复计费）
+    );
   },
 
   /**

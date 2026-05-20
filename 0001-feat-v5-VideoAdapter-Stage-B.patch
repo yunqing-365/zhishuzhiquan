@@ -1,0 +1,398 @@
+From 1df2bb0a69a6269f7ecae572e68a0d6b52e26d97 Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Tue, 19 May 2026 02:02:32 +0000
+Subject: [PATCH] =?UTF-8?q?feat:=20v5=20=E8=A7=86=E9=A2=91=E6=A8=A1?=
+ =?UTF-8?q?=E6=80=81=E5=AE=8C=E6=95=B4=E6=94=AF=E6=8C=81=20=E2=80=94=20Vid?=
+ =?UTF-8?q?eoAdapter=20Stage=20B=20=E5=89=8D=E7=AB=AF=E6=8E=A5=E5=85=A5?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+DataInputScreen.jsx:
+  - 新增 videoB64 / videoFileName / videoMeta state + videoFileInputRef
+  - 新增视频上传 UI（drag zone + 描述 textarea + Stage A/B 说明）
+  - 新增 handleVideoFile 文件处理器（base64 编码 + meta 记录）
+  - 新增 3 条视频 Demo 预设（影视创作 / 医疗纪录片 / 教学讲解）
+  - 修正 getDescriptionForBackend 支持 video 模态
+  - handlePreset / switchCategory 同步重置视频状态
+  - getProcessingSteps 添加 Stage B 帧采样日志步骤
+  - processData 添加视频验证 + onComplete 传入 videoB64（第7参数）
+  - SCENE_OVERRIDE_OPTIONS 视频场景改用唯一 vid_ 前缀（避免与 image 重复）
+  - 进程按钮渐变色覆盖 video 模态（violet→purple）
+  - 调试面板 select 新增视频场景 optgroup
+  - presetColor 支持 video 返回 violet
+
+App.jsx:
+  - 新增 videoData state
+  - handleInputComplete 接收第7参数 videoB64
+  - handleRestart 重置 videoData
+  - OracleValuationScreen 透传 videoData prop
+
+OracleValuationScreen.jsx:
+  - 接收 videoData prop
+  - apiClient.valuate 传入 video_data 字段（VideoAdapter Stage B）
+  - SCENE_LABELS 新增 vid_ 前缀视频场景标签
+  - buildMock 支持 vid_ → image 场景覆盖映射
+
+api.js:
+  - JSDoc 补充 video_data 参数说明
+---
+ src/App.jsx                   |   6 +-
+ src/DataInputScreen.jsx       | 144 ++++++++++++++++++++++++++++++----
+ src/OracleValuationScreen.jsx |  21 ++++-
+ src/api.js                    |   1 +
+ 4 files changed, 153 insertions(+), 19 deletions(-)
+
+diff --git a/src/App.jsx b/src/App.jsx
+index e2be3bd..45e1e5a 100644
+--- a/src/App.jsx
++++ b/src/App.jsx
+@@ -133,6 +133,7 @@ function AppInner() {
+   const [sceneOverride, setSceneOverride]   = useState(null);
+   const [audioData, setAudioData]           = useState(null);
+   const [imageData, setImageData]           = useState(null);
++  const [videoData, setVideoData]           = useState(null);
+   const [valuationResult, setValuationResult] = useState(null);
+   const [showHistory, setShowHistory]       = useState(false);
+   const [stepHistory, setStepHistory]       = useState([]);
+@@ -158,16 +159,18 @@ function AppInner() {
+     setSceneOverride(null);
+     setAudioData(null);
+     setImageData(null);
++    setVideoData(null);
+     setValuationResult(null);
+   }, []);
+ 
+-  const handleInputComplete = useCallback((data, category, zkEnabled, override, audioB64, imgB64) => {
++  const handleInputComplete = useCallback((data, category, zkEnabled, override, audioB64, imgB64, videoB64) => {
+     setAssetData(data);
+     setAssetCategory(category);
+     setIsZkMode(zkEnabled);
+     setSceneOverride(override ?? null);
+     setAudioData(audioB64 ?? null);
+     setImageData(imgB64 ?? null);
++    setVideoData(videoB64 ?? null);
+     goTo(2);
+   }, [goTo]);
+ 
+@@ -205,6 +208,7 @@ function AppInner() {
+             sceneOverride={sceneOverride}
+             audioData={audioData}
+             imageData={imageData}
++            videoData={videoData}
+             onNext={handleValuationNext}
+           />
+         )}
+diff --git a/src/DataInputScreen.jsx b/src/DataInputScreen.jsx
+index fa0d545..8dec70c 100644
+--- a/src/DataInputScreen.jsx
++++ b/src/DataInputScreen.jsx
+@@ -32,6 +32,22 @@ const DEMO_PRESETS = [
+     category: 'image',
+     description: '浏览器截图，Chrome界面截屏，普通桌面UI截图',
+   },
++  // ★ v5 视频预设
++  {
++    label: '电影级短片 (film_cinematic)',
++    category: 'video',
++    description: '4K电影级短片，专业摄影机拍摄，LOG格式调色，多镜头切换，手持+稳定器混用，内容：城市夜景空镜与人物情感独白，时长3分28秒，配乐原创，首发未授权。',
++  },
++  {
++    label: '医疗手术纪录片 (documentary_medical)',
++    category: 'video',
++    description: '医院手术室纪录片片段，腹腔镜微创手术全程记录，专业医疗摄像机，清晰度4K，涵盖术前准备、手术操作、术后处置完整流程，用于医学教学授权素材库。',
++  },
++  {
++    label: '教学讲解视频 (edu_lecture)',
++    category: 'video',
++    description: '高校公开课视频，量子计算基础理论讲解，教授口述配合白板推导，配备字幕与章节标记，30分钟完整课时，画质1080P，音质清晰，适合AI教育训练集。',
++  },
+   // ★ v4 音频预设
+   {
+     label: '临床语音转录 (speech_medical)',
+@@ -72,11 +88,11 @@ const SCENE_OVERRIDE_OPTIONS = [
+   { value: 'ambient_sfx',    label: '🌿 环境音效  ×0.60', group: 'audio' },
+   { value: 'noise',          label: '🚫 噪声/废话  ×0.05', group: 'audio' },
+ 
+-  // ── 视频场景 (Stage A 降级，真实帧采样接入后子场景细化) ──
+-  { value: 'illustration', label: '🎬 影视创作  ×8.0',  group: 'video' },
+-  { value: 'photo',        label: '📹 纪录/访谈  ×6.0',  group: 'video' },
+-  { value: 'diagram',      label: '🎓 教学讲解  ×5.5',  group: 'video' },
+-  { value: 'screenshot',   label: '📱 日常记录  ×3.0',  group: 'video' },
++  // ── 视频场景 ──
++  { value: 'vid_cinematic', label: '🎬 影视创作  ×8.0',  group: 'video' },
++  { value: 'vid_doc',       label: '📹 纪录/访谈  ×6.0',  group: 'video' },
++  { value: 'vid_edu',       label: '🎓 教学讲解  ×5.5',  group: 'video' },
++  { value: 'vid_user_gen',  label: '📱 日常记录  ×3.0',  group: 'video' },
+ ];
+ 
+ // ─── 波形可视化组件（仅在有 AudioContext 时渲染）──────────────────────
+@@ -142,12 +158,18 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
+   const [audioFileName, setAudioFileName] = useState(null);     // 上传文件名
+   const [recSeconds, setRecSeconds]     = useState(0);          // 录音计时
+ 
+-  const mediaRecorderRef = useRef(null);
+-  const chunksRef        = useRef([]);
+-  const analyserRef      = useRef(null);
+-  const audioCtxRef      = useRef(null);
+-  const timerRef         = useRef(null);
+-  const fileInputRef     = useRef(null);
++  // ★ v5 视频状态
++  const [videoB64, setVideoB64]           = useState(null);       // base64 video
++  const [videoFileName, setVideoFileName] = useState(null);       // 文件名
++  const [videoMeta, setVideoMeta]         = useState(null);       // { size, type }
++
++  const mediaRecorderRef   = useRef(null);
++  const chunksRef          = useRef([]);
++  const analyserRef        = useRef(null);
++  const audioCtxRef        = useRef(null);
++  const timerRef           = useRef(null);
++  const fileInputRef       = useRef(null);
++  const videoFileInputRef  = useRef(null);
+ 
+   // ─ 清理录音资源
+   const stopRecording = useCallback(() => {
+@@ -222,8 +244,10 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
+   };
+ 
+   const getDescriptionForBackend = () => {
+-    if (assetCategory === 'text') return inputText;
+-    return inputText || (assetCategory === 'audio' ? '音频语料' : '原创图像');
++    if (assetCategory === 'text')  return inputText;
++    if (assetCategory === 'audio') return inputText || '音频语料';
++    if (assetCategory === 'video') return inputText || '视频影像';
++    return inputText || '原创图像';
+   };
+ 
+   const handlePreset = (preset) => {
+@@ -231,9 +255,12 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
+     setAssetCategory(preset.category);
+     setInputText(preset.description);
+     setSelectedImage(preset.category === 'image' ? '[Demo 预设图像]' : null);
+-    setImageB64(null);  // Demo 预设无真实图像，后端以描述文字代理
++    setImageB64(null);
+     setAudioB64(null);
+     setAudioFileName(null);
++    setVideoB64(null);
++    setVideoFileName(null);
++    setVideoMeta(null);
+     setSceneOverride('');
+     if (isRecording) stopRecording();
+   };
+@@ -247,10 +274,27 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
+     setAudioB64(null);
+     setAudioFileName(null);
+     setImageB64(null);
++    setVideoB64(null);
++    setVideoFileName(null);
++    setVideoMeta(null);
+     setActivePreset(null);
+     setSceneOverride('');
+   };
+ 
++  // ─ 上传视频文件
++  const handleVideoFile = (e) => {
++    const file = e.target.files?.[0];
++    if (!file) return;
++    const reader = new FileReader();
++    reader.onloadend = () => {
++      setVideoB64(reader.result.split(',')[1]);
++      setVideoFileName(file.name);
++      setVideoMeta({ size: file.size, type: file.type });
++    };
++    reader.readAsDataURL(file);
++    setVideoB64(null);
++  };
++
+   const getProcessingSteps = (category, isZk) => {
+     const steps = [];
+     const overrideNote = sceneOverride ? ` [强制场景: ${sceneOverride}]` : '';
+@@ -264,6 +308,10 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
+         steps.push({ p: 28, text: `【Stage 2 — 场景分类】SceneClassifier v4 分析图像描述，识别子场景...${overrideNote}` });
+         steps.push({ p: 45, text: '【Stage 3 — 特征提取】ImageAdapter: LAION-Aesthetics 美学评估 + DWT 隐写鲁棒性...' });
+         steps.push({ p: 62, text: '【Stage 3 — 稀缺度】CLIP 512维特征对齐，计算画派风格稀缺度...' });
++      } else if (category === 'video') {
++        steps.push({ p: 28, text: `【Stage 2 — 场景分类】VideoAdapter v1 Stage-B: 图像分类器代理 + 描述关键词${overrideNote}` });
++        steps.push({ p: 45, text: '【Stage 3 — 帧采样】OpenCV 均匀采样16帧 → CLIP ViT-B/32 per-frame 特征提取...' });
++        steps.push({ p: 62, text: '【Stage 3 — 时序聚合】帧特征 mean+std → 时域多样性 + 镜头切换密度 + CLIP 美学评分...' });
+       } else {
+         steps.push({ p: 28, text: `【Stage 2 — 场景分类】SceneClassifier v4 分析文本领域，识别子场景...${overrideNote}` });
+         steps.push({ p: 45, text: '【Stage 3 — 特征提取】TextAdapter: 场景专项 SNR + Shannon 熵 + 废话熔断检测...' });
+@@ -285,6 +333,8 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
+     if (assetCategory === 'image' && !selectedImage)  return alert('请上传画作或选择 Demo 预设');
+     if (assetCategory === 'audio' && !desc.trim() && !audioB64)
+       return alert('请输入音频描述，或先录音/上传音频文件');
++    if (assetCategory === 'video' && !desc.trim())
++      return alert('请输入视频描述内容（Stage B 真实帧采样需上传视频文件）');
+ 
+     if (isRecording) stopRecording();
+ 
+@@ -300,8 +350,7 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
+         cur++;
+       } else {
+         clearInterval(interval);
+-        // 第 5 参数传 audioB64（文本/图像为 null）
+-        setTimeout(() => onComplete(desc, assetCategory, enableZK, sceneOverride || null, audioB64 || null, imageB64 || null), 1200);
++        setTimeout(() => onComplete(desc, assetCategory, enableZK, sceneOverride || null, audioB64 || null, imageB64 || null, videoB64 || null), 1200);
+       }
+     }, 750);
+   };
+@@ -313,6 +362,7 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
+   const presetColor = (preset) => {
+     if (preset.category === 'image') return 'text-amber-500';
+     if (preset.category === 'audio') return 'text-emerald-500';
++    if (preset.category === 'video') return 'text-violet-500';
+     return 'text-blue-500';
+   };
+ 
+@@ -445,6 +495,62 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
+               </div>
+             )}
+ 
++            {/* ★ v5 视频输入区 */}
++            {assetCategory === 'video' && (
++              <div className="space-y-3">
++                {/* 上传区 */}
++                <div
++                  onClick={() => videoFileInputRef.current?.click()}
++                  className={`w-full h-24 bg-slate-950/50 border-2 border-dashed rounded-xl flex flex-col items-center justify-center cursor-pointer transition-colors ${videoFileName ? 'border-violet-500 bg-violet-900/10' : 'border-slate-700 hover:border-violet-500/60'}`}
++                >
++                  {videoFileName ? (
++                    <>
++                      <Film className="w-6 h-6 text-violet-400 mb-1" />
++                      <p className="text-xs text-violet-400 font-bold">✓ 视频已加载</p>
++                      <p className="text-[10px] text-violet-600 mt-0.5 truncate max-w-[220px]">
++                        {videoFileName}
++                        {videoMeta && <span className="ml-1 opacity-70">({(videoMeta.size / 1048576).toFixed(1)} MB)</span>}
++                      </p>
++                    </>
++                  ) : (
++                    <>
++                      <UploadCloud className="w-6 h-6 text-slate-500 mb-1" />
++                      <p className="text-xs text-slate-300 font-bold">点击上传视频文件</p>
++                      <p className="text-[10px] text-slate-600 mt-0.5">MP4 / MOV / WEBM · Stage B 帧采样</p>
++                    </>
++                  )}
++                </div>
++                <input
++                  ref={videoFileInputRef}
++                  type="file"
++                  accept="video/mp4,video/quicktime,video/webm,video/avi,video/*"
++                  className="hidden"
++                  onChange={handleVideoFile}
++                />
++
++                {/* 视频描述 */}
++                <div>
++                  <p className="text-[10px] text-slate-500 mb-1.5 flex items-center gap-1">
++                    <Tag className="w-3 h-3" />
++                    描述视频内容/场景 <span className="text-violet-400">(必填·Stage A 代理 + Stage B 帧采样双通道)</span>
++                  </p>
++                  <textarea
++                    value={inputText}
++                    onChange={(e) => setInputText(e.target.value)}
++                    placeholder={"例: 4K电影级短片，专业摄影机，LOG调色，城市夜景空镜...\n或: 医疗手术纪录片 / 高校公开课讲解 / 日常 vlog 记录..."}
++                    className="w-full h-20 bg-slate-950/50 border border-slate-700 rounded-xl p-3 font-mono text-xs text-violet-400 placeholder-slate-600 focus:outline-none focus:border-violet-500 resize-none"
++                  />
++                </div>
++
++                {/* Stage 说明 */}
++                <div className="text-[10px] text-slate-600 bg-slate-950/50 rounded-lg px-3 py-2 border border-slate-800/60 font-mono leading-relaxed">
++                  <span className="text-violet-700">●</span> Stage B (有视频): OpenCV 均匀采样16帧 → CLIP ViT-B/32 → 时域多样性 + 镜头切换密度<br/>
++                  <span className="text-slate-700">●</span> Stage A (仅描述): 文字代理推断，精度受限，适合快速预估<br/>
++                  <span className="text-slate-600">  TEV 基础倍率: 500× · 场景权重: 图像分类器代理</span>
++                </div>
++              </div>
++            )}
++
+             {/* ★ v4 音频输入区 */}
+             {assetCategory === 'audio' && (
+               <div className="space-y-3">
+@@ -570,6 +676,10 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
+                       {SCENE_OVERRIDE_OPTIONS.filter(o => o.group === 'audio').map(o =>
+                         <option key={o.value} value={o.value}>{o.label}</option>)}
+                     </optgroup>
++                    <optgroup label="── 视频场景 (v5 新增) ──">
++                      {SCENE_OVERRIDE_OPTIONS.filter(o => o.group === 'video').map(o =>
++                        <option key={o.value} value={o.value}>{o.label}</option>)}
++                    </optgroup>
+                   </select>
+                   {isOverrideActive && (
+                     <p className="text-[10px] text-amber-400 flex items-center gap-1">
+@@ -586,6 +696,8 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
+               className={`w-full py-3.5 font-black rounded-xl transition-all shadow-lg text-white text-sm
+                 ${assetCategory === 'audio'
+                   ? 'bg-gradient-to-r from-emerald-600 to-teal-500 hover:from-emerald-700 hover:to-teal-600'
++                  : assetCategory === 'video'
++                  ? 'bg-gradient-to-r from-violet-600 to-purple-500 hover:from-violet-700 hover:to-purple-600'
+                   : enableZK
+                     ? 'bg-gradient-to-r from-purple-600 to-indigo-500 hover:from-purple-700 hover:to-indigo-600'
+                     : 'bg-slate-700 hover:bg-slate-600'}
+diff --git a/src/OracleValuationScreen.jsx b/src/OracleValuationScreen.jsx
+index 5860813..5b82343 100644
+--- a/src/OracleValuationScreen.jsx
++++ b/src/OracleValuationScreen.jsx
+@@ -16,6 +16,11 @@ const SCENE_LABELS = {
+   diagram:      { label: '图表图解',   color: 'text-violet-400',  bg: 'bg-violet-900/20 border-violet-500/30', mult: '0.55×' },
+   noise:        { label: '噪声/废话',  color: 'text-red-500',     bg: 'bg-red-950/30 border-red-700/30',       mult: '0.05×' },
+   general:      { label: '通用音频',   color: 'text-slate-400',   bg: 'bg-slate-900/30 border-slate-600/30',   mult: '1.00×' },
++  // ★ v5 视频场景覆盖标签（vid_ 前缀映射到 image 场景分类器）
++  vid_cinematic: { label: '影视创作',  color: 'text-violet-400',  bg: 'bg-violet-900/20 border-violet-500/30', mult: '1.50×' },
++  vid_doc:       { label: '纪录/访谈', color: 'text-purple-400',  bg: 'bg-purple-900/20 border-purple-500/30', mult: '1.00×' },
++  vid_edu:       { label: '教学讲解',  color: 'text-indigo-400',  bg: 'bg-indigo-900/20 border-indigo-500/30', mult: '0.55×' },
++  vid_user_gen:  { label: '日常记录',  color: 'text-slate-400',   bg: 'bg-slate-900/30 border-slate-600/30',   mult: '0.25×' },
+ };
+ 
+ // 音频细粒度场景标签（audio_scene 字段，仅音频模态）
+@@ -130,7 +135,17 @@ const buildMock = (assetCategory, sceneOverride) => {
+ 
+   // 文本 / 图像 / 视频 模态
+   const isVideo = assetCategory === 'video';
+-  const mockScene = sceneOverride || (isImg ? 'illustration' : isVideo ? 'illustration' : 'medical_sft');
++  // vid_ 前缀的视频场景覆盖映射到对应的图像/文本场景
++  const VID_SCENE_MAP = {
++    vid_cinematic: 'illustration',
++    vid_doc:       'photo',
++    vid_edu:       'diagram',
++    vid_user_gen:  'screenshot',
++  };
++  const resolvedOverride = (isVideo && sceneOverride && VID_SCENE_MAP[sceneOverride])
++    ? VID_SCENE_MAP[sceneOverride]
++    : sceneOverride;
++  const mockScene = resolvedOverride || (isImg ? 'illustration' : isVideo ? 'illustration' : 'medical_sft');
+   const tev   = isImg ? '50x'    : isVideo ? '500x'  : '1x';
+   const scMult= isImg ? '1.5x'   : isVideo ? '8.0x'  : '1.35x';
+   const effW  = isImg ? '75x'    : isVideo ? '4000x' : '1.35x';
+@@ -177,7 +192,8 @@ const buildMock = (assetCategory, sceneOverride) => {
+ };
+ 
+ // ★ v4: 接收 audioData prop，onNext 回传完整 valuationResult
+-const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverride, audioData, imageData, onNext }) => {
++// ★ v5: 新增 videoData prop
++const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverride, audioData, imageData, videoData, onNext }) => {
+   const [isCalculating, setIsCalculating]     = useState(true);
+   const [calcStep, setCalcStep]               = useState(0);
+   const [chartData, setChartData]             = useState([]);
+@@ -231,6 +247,7 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
+           scene_override: sceneOverride ?? null,
+           audio_data:     audioData ?? null,
+           image_data:     imageData ?? null,  // ★ v6: 真实图像 base64
++          video_data:     videoData ?? null,  // ★ v5: 视频 base64
+         });
+         const metrics = normalizeMetrics(data.metrics);
+         setTimeout(() => {
+diff --git a/src/api.js b/src/api.js
+index ed8333e..f6ba69c 100644
+--- a/src/api.js
++++ b/src/api.js
+@@ -86,6 +86,7 @@ export const apiClient = {
+    *   - scene_override: string | null
+    *   - audio_data: base64 string | null
+    *   - image_data: base64 string | null
++   *   - video_data: base64 string | null  (★ v5: MP4/MOV/WEBM, VideoAdapter Stage B)
+    * 返回: valuationResult 对象（与 OracleValuationScreen 期待格式完全对齐）
+    */
+   async valuate(payload) {
+-- 
+2.43.0
+

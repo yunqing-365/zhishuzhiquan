@@ -72,6 +72,14 @@ from scoring import (
 from adapters import TextAdapter, ImageAdapter, AudioAdapter, VideoAdapter, classify_audio_scene
 from adapters.audio_adapter import _decode_audio_b64
 
+# ── ZK 承诺引擎（阶段 2）────────────────────────────────────────────
+try:
+    from zk_commitment import generate_zk_commitment
+    _ZK_AVAILABLE = True
+except ImportError as _zk_import_err:
+    _ZK_AVAILABLE = False
+    print(f"!! [ZK] zk_commitment 模块未找到，ZK 承诺功能禁用: {_zk_import_err}")
+
 
 # ── 共享底层 ──────────────────────────────────────────────────────────
 # ── SQLite 历史持久化 ────────────────────────────────────────────────
@@ -155,10 +163,10 @@ _video_adapter = VideoAdapter(embed_fn=_embed_fn, get_corpus_fn=_get_corpus)
 
 # ── 模态 TEV 权重（token equivalent value 倍率）────────────────────────
 MODALITY_TEV: Dict[str, float] = {
-    "text":  1.0,
-    "image": 50.0,
-    "audio": 120.0,
-    "video": 500.0,   # 预留，VideoAdapter 接入后自动生效
+    "text":  1.0,      # 纯文本语料基准
+    "image": 50.0,     # 视觉特征 + pHash → 50x
+    "audio": 120.0,    # MFCC + AFP 声学指纹 → 120x
+    "video": 350.0,    # CLIP 帧 + 时序多样性（双流 Stage C 后升至 500x）
 }
 
 BASE_UNIT = 2.0
@@ -199,8 +207,20 @@ def _audio_classify(asset) -> tuple[SceneResult, Optional[str]]:
 
 
 def _video_classify(asset) -> tuple:
-    """视频模态：Stage A 降级使用图像场景分类器（描述文字）"""
-    return _clf.classify_image(asset.description), None
+    """
+    视频模态分类 v2: 使用 SceneClassifier.classify_video()
+      - 通道1: 描述文字关键词
+      - 通道2: VideoAdapter 私有字段 (_clip_aesthetic / _has_video / _duration_s)
+    Stage A 降级: 无视频数据时退化为关键词 text_proxy
+    """
+    # 尝试从 VideoAdapter 获取已提取的视觉特征（extract_metrics 已运行时可用）
+    # 此处 asset 尚未调用 extract_metrics，所以使用已知默认值；
+    # 真实视觉特征将在 extract_metrics 内部计算并写回 features._*
+    # classify_video 纯文字通道已足够做第一轮路由
+    return _clf.classify_video(
+        description = asset.description,
+        has_video   = bool(asset.video_data),
+    ), None
 
 
 def _build_registry(clf: SceneClassifier) -> Dict[str, ModalityConfig]:
@@ -241,7 +261,7 @@ def _build_registry(clf: SceneClassifier) -> Dict[str, ModalityConfig]:
 
 
 # ── FastAPI ───────────────────────────────────────────────────────────
-app = FastAPI(title="AI-Echo Multi-modal Oracle v6")
+app = FastAPI(title="AI-Echo Multi-modal Oracle v7")
 # CORS 配置：生产从 ALLOWED_ORIGINS 环境变量读取，开发仅允许本地 Vite
 _raw_origins = os.environ.get("ALLOWED_ORIGINS", "")
 _allowed_origins = (
@@ -431,6 +451,21 @@ async def valuate(asset: AssetData):
         },
     }
 
+    # ── Stage 6: ZK 承诺生成（is_zk_mode=True 且估值成功时）────────
+    _response["zk_proof"] = None
+    if asset.is_zk_mode and _ZK_AVAILABLE and _response["status"] == "success":
+        try:
+            zk = generate_zk_commitment(
+                asset_hash = asset_hash_val,
+                base_value = base_val,
+                scene      = sr.scene,
+                modality   = asset.asset_category,
+            )
+            _response["zk_proof"] = zk.to_dict()
+            print(f">> [ZK] 承诺生成成功: {zk.commitment[:18]}...")
+        except Exception as _zk_err:
+            print(f"!! [ZK] 承诺生成失败（降级跳过）: {_zk_err}")
+
     # ── 估值后处理：存入 ChromaDB + SQLite（两者失败均不影响响应）────
     if _response["status"] == "success":
         # 存入向量知识库（让 KNN-Shapley 越来越精确）
@@ -453,7 +488,11 @@ async def valuate(asset: AssetData):
 @app.get("/api/scenes")
 async def list_scenes():
     """从注册表动态生成，新增模态自动出现，无需手动同步"""
-    from scene_classifier import TEXT_SCENE_WEIGHTS, IMAGE_SCENE_WEIGHTS, AUDIO_SCENE_WEIGHTS, AUDIO_SCENE_TO_TEV
+    from scene_classifier import (
+        TEXT_SCENE_WEIGHTS, IMAGE_SCENE_WEIGHTS,
+        AUDIO_SCENE_WEIGHTS, AUDIO_SCENE_TO_TEV,
+        VIDEO_SCENE_WEIGHTS, VIDEO_SCENE_TO_TEV,
+    )
     from scoring import AMM_SCENE_CONFIG
     return {
         "supported_modalities": {
@@ -464,6 +503,8 @@ async def list_scenes():
         "image_scenes":      IMAGE_SCENE_WEIGHTS,
         "audio_scenes":      AUDIO_SCENE_WEIGHTS,        # ★ v4: 音频细粒度场景权重
         "audio_scene_to_tev": AUDIO_SCENE_TO_TEV,        # ★ v4: 前端场景映射表
+        "video_scene_weights": VIDEO_SCENE_WEIGHTS,        # ★ v5: 视频场景权重表
+        "video_scene_to_tev":  VIDEO_SCENE_TO_TEV,         # ★ v5: 视频场景 TEV 映射
         "modality_tev":      MODALITY_TEV,
         "amm_scene_config":  AMM_SCENE_CONFIG,
         "domain_demand":     DOMAIN_DEMAND,              # 向后兼容

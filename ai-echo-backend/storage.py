@@ -38,6 +38,22 @@ _lock = threading.Lock()
 # 初始化
 # ─────────────────────────────────────────────────────────────────────
 
+def _migrate_db(conn: sqlite3.Connection) -> None:
+    """
+    安全迁移旧版数据库（幂等）。
+    只做 ADD COLUMN，不破坏已有数据。
+    ALTER TABLE 若列已存在会抛 OperationalError，静默忽略。
+    """
+    migrations = [
+        "ALTER TABLE valuations ADD COLUMN zk_commitment TEXT",
+    ]
+    for sql in migrations:
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError:
+            pass  # 列已存在，跳过
+
+
 def init_db() -> bool:
     """创建数据库表（幂等，重复调用安全）"""
     try:
@@ -69,9 +85,11 @@ def init_db() -> bool:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_modality ON valuations(modality)"
             )
+            # ★ v3: 对旧库执行迁移（新建库此步骤无副作用）
+            _migrate_db(conn)
             conn.commit()
             conn.close()
-        print(f">> [storage] SQLite 初始化完成: {DB_PATH}")
+        print(f">> [storage] SQLite 初始化完成 (v3): {DB_PATH}")
         return True
     except Exception as e:
         print(f"!! [storage] 初始化失败 (不影响估值): {e}")
@@ -94,6 +112,8 @@ def save_valuation(
     try:
         sc  = result.get("scene_classification", {})
         fv  = result.get("final_valuation", {})
+        zk  = result.get("zk_proof") or {}
+        zk_commitment = zk.get("commitment") if zk else None
         preview = (description[:120] + "…") if len(description) > 120 else description
 
         with _lock:
@@ -104,8 +124,8 @@ def save_valuation(
                     timestamp, asset_hash, modality, scene, audio_scene,
                     composite_quality, dynamic_price, base_value,
                     option_premium, creator_ratio, vector_distance,
-                    description_preview, full_result
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    description_preview, full_result, zk_commitment
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     int(time.time()),
@@ -121,6 +141,7 @@ def save_valuation(
                     round(vector_distance, 4),
                     preview,
                     json.dumps(result, ensure_ascii=False),
+                    zk_commitment,   # ★ v3: bytes32 hex 或 NULL
                 ),
             )
             row_id = cur.lastrowid

@@ -77,11 +77,12 @@ export const useAIEchoContract = () => {
 
   // ── 注册资产上链 ─────────────────────────────────────────────────
   const registerAsset = useCallback(async ({
-    assetHashStr,  // 后端返回的 asset_hash 字符串
-    modality,      // 'text' | 'image' | 'audio' | 'video'
-    domainKey,     // 'medical_sft' | 'illustration' | ...
-    audioScene,    // 音频细粒度场景（非音频时传 ''）
-    baseValue,     // 后端 final_valuation.base_value (整数 CRD)
+    assetHashStr,   // 后端返回的 asset_hash 字符串
+    modality,       // 'text' | 'image' | 'audio' | 'video'
+    domainKey,      // 'medical_sft' | 'illustration' | ...
+    audioScene,     // 音频细粒度场景（非音频时传 ''）
+    baseValue,      // 后端 final_valuation.base_value (整数 CRD)
+    zkCommitment,   // ★ Stage 2: bytes32 ZK 承诺（null → bytes32(0)）
   }) => {
     if (!contractReady) throw new Error('合约未就绪或钱包未连接');
     setTxStatus('pending');
@@ -90,6 +91,10 @@ export const useAIEchoContract = () => {
     try {
       const assetHashUint = hashToUint256(assetHashStr);
       const hashAlgo = modalityToHashAlgo(modality);
+      // ★ ZK 承诺：有则转 bytes32，无则传 0x0000…
+      const zkBytes32 = zkCommitment && zkCommitment.startsWith('0x')
+        ? zkCommitment.padEnd(66, '0')   // 确保 66 chars (0x + 64)
+        : '0x' + '0'.repeat(64);
       const hash = await writeContractAsync({
         address:      CONTRACT_ADDRESS,
         abi:          AI_ECHO_ABI,
@@ -101,6 +106,7 @@ export const useAIEchoContract = () => {
           audioScene  || '',
           BigInt(Math.round(baseValue || 0)),
           hashAlgo,
+          zkBytes32,   // ★ Stage 2
         ],
       });
       setTxHash(hash);

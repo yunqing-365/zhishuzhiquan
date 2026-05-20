@@ -14,7 +14,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Clock, Database, TrendingUp, RefreshCw, ChevronRight,
   Mic, FileText, Image as ImageIcon, Film, X, Search,
-  Trash2, Trophy, AlertCircle,
+  Trash2, Trophy, AlertCircle, Lock,
 } from 'lucide-react';
 import { apiClient } from './api';
 
@@ -72,6 +72,15 @@ const HistoryCard = ({ record, onClick, onDelete }) => {
               </span>
               {record.audio_scene && (
                 <span className="text-[9px] text-slate-500 font-mono">{record.audio_scene}</span>
+              )}
+              {record.zk_commitment && (
+                <span
+                  className="flex items-center gap-0.5 text-[9px] font-mono px-1 py-0.5 rounded border border-purple-500/25 text-purple-500 bg-purple-950/20"
+                  title={record.zk_commitment}
+                >
+                  <Lock className="w-2.5 h-2.5" />
+                  zk
+                </span>
               )}
               <span className="text-[10px] text-slate-600 ml-auto">{fmtTime(record.timestamp)}</span>
             </div>

@@ -62,6 +62,7 @@ export const AI_ECHO_ABI = [
       { name: 'hashAlgo',      type: 'uint8'    },
       { name: 'timestamp',     type: 'uint256'  },
       { name: 'paywallActive', type: 'bool'     },
+      { name: 'zkCommitment',  type: 'bytes32'  },  // ★ Stage 2
     ],
   },
   {
@@ -97,12 +98,13 @@ export const AI_ECHO_ABI = [
     type: 'function',
     stateMutability: 'nonpayable',
     inputs: [
-      { name: '_assetHash',  type: 'uint256' },
-      { name: '_modality',   type: 'string'  },
-      { name: '_domainKey',  type: 'string'  },
-      { name: '_audioScene', type: 'string'  },
-      { name: '_baseValue',  type: 'uint256' },
-      { name: '_hashAlgo',   type: 'uint8'   },
+      { name: '_assetHash',    type: 'uint256' },
+      { name: '_modality',     type: 'string'  },
+      { name: '_domainKey',    type: 'string'  },
+      { name: '_audioScene',   type: 'string'  },
+      { name: '_baseValue',    type: 'uint256' },
+      { name: '_hashAlgo',     type: 'uint8'   },
+      { name: '_zkCommitment', type: 'bytes32' },  // ★ Stage 2
     ],
     outputs: [],
   },
@@ -150,11 +152,12 @@ export const AI_ECHO_ABI = [
     name: 'AssetRegistered',
     type: 'event',
     inputs: [
-      { name: 'assetHash',  type: 'uint256', indexed: true  },
-      { name: 'modality',   type: 'string',  indexed: false },
-      { name: 'domainKey',  type: 'string',  indexed: false },
-      { name: 'audioScene', type: 'string',  indexed: false },
-      { name: 'hashAlgo',   type: 'uint8',   indexed: false },
+      { name: 'assetHash',    type: 'uint256', indexed: true  },
+      { name: 'modality',     type: 'string',  indexed: false },
+      { name: 'domainKey',    type: 'string',  indexed: false },
+      { name: 'audioScene',   type: 'string',  indexed: false },
+      { name: 'hashAlgo',     type: 'uint8',   indexed: false },
+      { name: 'zkCommitment', type: 'bytes32', indexed: false },  // ★ Stage 2
     ],
   },
   {

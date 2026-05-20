@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { apiClient, ApiError } from './api';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts';
-import { Activity, ShieldCheck, FileText, Network, CheckCircle2, ArrowRight, Tag, Layers, FlaskConical, Mic } from 'lucide-react';
+import { Activity, ShieldCheck, FileText, Network, CheckCircle2, ArrowRight, Tag, Layers, FlaskConical, Mic, Lock, Eye, KeyRound } from 'lucide-react';
 
 // 场景标签配置（与后端 scene_classifier.py + audio_adapter.py 完整同步）
 const SCENE_LABELS = {
@@ -281,6 +281,7 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
   }, []);
 
   const sc          = valuationResult?.scene_classification;
+  const zkProof     = valuationResult?.zk_proof;
   const sceneConfig = sc ? (SCENE_LABELS[sc.scene] || SCENE_LABELS['chat_qa']) : null;
   const fv          = valuationResult?.final_valuation;
   const meta        = valuationResult?.meta;
@@ -515,6 +516,50 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
                     </div>
                   </div>
                 </>
+              )}
+
+              {/* ── ZK 承诺凭证展示（当 is_zk_mode 且后端返回 zk_proof 时显示）── */}
+              {zkProof && valuationResult?.status !== 'rejected' && (
+                <div className="mb-4 p-3 rounded-xl border border-purple-500/40 bg-purple-950/30 relative z-10">
+                  <div className="flex items-center gap-2 mb-2">
+                    <Lock className="w-3.5 h-3.5 text-purple-400" />
+                    <span className="text-[10px] font-bold text-purple-300 uppercase tracking-wider">
+                      zkML 零知识承诺凭证
+                    </span>
+                    <span className="ml-auto text-[9px] font-mono px-1.5 py-0.5 rounded border border-purple-500/30 text-purple-500">
+                      {zkProof.proof_type}
+                    </span>
+                    {!zkProof.is_real_proof && (
+                      <span className="text-[9px] font-mono px-1.5 py-0.5 rounded border border-amber-500/30 text-amber-500 bg-amber-900/20">
+                        Stage 2 · Hash Commit
+                      </span>
+                    )}
+                  </div>
+                  <div className="space-y-1.5 font-mono text-[9px]">
+                    <div className="flex items-start gap-2">
+                      <span className="text-slate-500 shrink-0 w-20">commitment</span>
+                      <span className="text-emerald-400 break-all leading-tight">
+                        {zkProof.commitment.slice(0, 18)}…{zkProof.commitment.slice(-6)}
+                      </span>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <span className="text-slate-500 shrink-0 w-20">nullifier_h</span>
+                      <span className="text-blue-400 break-all leading-tight">
+                        {zkProof.nullifier_hash.slice(0, 18)}…{zkProof.nullifier_hash.slice(-6)}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-2 pt-1 border-t border-purple-800/40">
+                      <Eye className="w-3 h-3 text-slate-500" />
+                      <span className="text-slate-500">
+                        value_floor: <span className="text-white">{zkProof.public_signals?.value_floor?.toLocaleString()} CRD</span>
+                        &nbsp;·&nbsp;
+                        modality: <span className="text-white">{zkProof.public_signals?.modality_code}</span>
+                        &nbsp;·&nbsp;
+                        schema: <span className="text-white">v{zkProof.public_signals?.schema_version}</span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
               )}
 
               <button

@@ -113,6 +113,9 @@ const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, 
   // 从 valuationResult 提取注册所需参数
   const sc = valuationResult?.scene_classification;
   const assetHashStr = valuationResult?.asset_hash ?? null;
+  // ★ ZK 承诺（阶段 2）
+  const zkProof      = valuationResult?.zk_proof ?? null;
+  const zkCommitment = zkProof?.commitment ?? null;
 
   const calculatePrice = (d) => Math.round(baseValue * (1000 + d * alpha) / 1000);
 
@@ -133,12 +136,14 @@ const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, 
     addLog(`>> [Web3] 目标网络: ${contract.targetChain?.name} (chain ${contract.targetChain?.id})`);
     try {
       addLog('>> [步骤 1/3] 调用 registerAsset() — 资产上链注册...');
+      addLog(`>> [ZK] 承诺凭证: ${zkCommitment ? zkCommitment.slice(0, 18) + '…' : '无（zkML 未启用）'}`);
       const regTxHash = await contract.registerAsset({
-        assetHashStr: assetHashStr,
-        modality:     assetCategory,
-        domainKey:    sc?.scene || 'general',
-        audioScene:   sc?.audio_scene || '',
-        baseValue:    fv?.base_value || 0,
+        assetHashStr:  assetHashStr,
+        modality:      assetCategory,
+        domainKey:     sc?.scene || 'general',
+        audioScene:    sc?.audio_scene || '',
+        baseValue:     fv?.base_value || 0,
+        zkCommitment:  zkCommitment,
       });
       addLog(`>> [链上确认] registerAsset 交易广播: ${regTxHash?.slice(0, 18)}...`);
       addLog('>> [步骤 2/3] 等待区块确认...');
@@ -251,6 +256,13 @@ const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, 
                   <div className="p-2.5 bg-purple-950/30 rounded-lg border border-purple-500/20 text-[10px] font-mono text-purple-400 flex flex-col gap-0.5">
                     <span>🔮 Oracle 定价数据已接入</span>
                     <span className="text-slate-500 truncate">{valuationResult.asset_hash}</span>
+                    {zkCommitment && (
+                      <span className="text-purple-500/80 truncate flex items-center gap-1">
+                        <span className="text-purple-600">zk·</span>
+                        {zkCommitment.slice(0,18)}…{zkCommitment.slice(-6)}
+                        <span className="text-slate-600 ml-1">{zkProof?.proof_type}</span>
+                      </span>
+                    )}
                   </div>
                 )}
                 <div className="p-3 bg-slate-900 rounded-lg border border-slate-800">

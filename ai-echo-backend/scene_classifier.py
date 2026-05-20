@@ -1,5 +1,5 @@
 """
-场景分类器 (Scene Classifier) — Stage 2  v4
+场景分类器 (Scene Classifier) — Stage 2  v5
 =============================================
 v3 → v4 升级点:
   [新增] classify_audio(): 音频双通道融合分类
@@ -195,6 +195,84 @@ IMAGE_SCENE_WEIGHTS: dict = {
 # ★ v4 新增: 音频细粒度场景权重 (对外导出)
 # TEV 场景映射: speech_medical→medical_sft(1.35x), speech_legal→legal_doc(1.20x)
 # 音频场景有自己的稀缺溢价，故单独配置
+# ★ 新增: 视频场景权重表 (6类，与 AMM_SCENE_CONFIG 对齐)
+# TEV 场景映射: documentary→legal_doc; lecture→medical_sft; cinematic→creative
+VIDEO_SCENE_WEIGHTS: dict = {
+    "documentary":   1.40,   # 纪录片/采访/庭审: 叙述密度高，字幕对齐价值高
+    "lecture":       1.30,   # 教学/演讲: TTS & 知识提炼训练集
+    "cinematic":     1.20,   # 电影级制作: LoRA/T2V 训练素材
+    "sports_action": 0.90,   # 运动/动作: 时序建模用，价值中等
+    "vlog":          0.65,   # 个人 vlog: 质量参差，低溢价
+    "noise":         0.05,   # 噪声/无效: 熔断
+}
+
+# 视频场景 → TEV 场景映射
+VIDEO_SCENE_TO_TEV: dict = {
+    "documentary":   "legal_doc",
+    "lecture":       "medical_sft",
+    "cinematic":     "creative",
+    "sports_action": "chat_qa",
+    "vlog":          "chat_qa",
+    "noise":         "noise",
+}
+
+# 视频场景 6D composite weights
+# snr: 码率/画质; structure: 镜头切换密度; entropy: 时域多样性
+VIDEO_SCENE_COMPOSITE_WEIGHTS: dict = {
+    "documentary":   {"entropy":0.20,"snr":0.25,"structure":0.25,"scarcity":0.15,"llm_value":0.10,"shapley":0.05},
+    "lecture":       {"entropy":0.25,"snr":0.20,"structure":0.20,"scarcity":0.15,"llm_value":0.15,"shapley":0.05},
+    "cinematic":     {"entropy":0.20,"snr":0.30,"structure":0.25,"scarcity":0.10,"llm_value":0.10,"shapley":0.05},
+    "sports_action": {"entropy":0.30,"snr":0.15,"structure":0.30,"scarcity":0.10,"llm_value":0.10,"shapley":0.05},
+    "vlog":          {"entropy":0.25,"snr":0.20,"structure":0.20,"scarcity":0.15,"llm_value":0.15,"shapley":0.05},
+    "noise":         {"entropy":0.20,"snr":0.20,"structure":0.20,"scarcity":0.20,"llm_value":0.10,"shapley":0.10},
+}
+
+# 视频场景关键词信号
+VIDEO_SCENE_SIGNALS: dict = {
+    "documentary": {
+        "keywords": [
+            "纪录片","采访","庭审","专题","调查","新闻","访谈","报道",
+            "documentary","interview","investigation","report","coverage",
+            "court","witness","journalism","investigative",
+        ],
+    },
+    "lecture": {
+        "keywords": [
+            "教学","讲课","课程","授课","演讲","培训","教程","讲解","讲座",
+            "tutorial","lecture","course","lesson","teaching","class",
+            "how-to","guide","webinar","presentation","keynote",
+        ],
+    },
+    "cinematic": {
+        "keywords": [
+            "电影","影片","故事片","短片","剪辑","预告","mv","music video",
+            "电影级","4k","8k","uhd","hdr","raw","log","dolby","航拍",
+            "cinematic","film","movie","short film","trailer","color grade",
+            "anamorphic","drone","aerial","bokeh","steadicam",
+        ],
+    },
+    "sports_action": {
+        "keywords": [
+            "运动","体育","比赛","篮球","足球","跑步","健身","训练","竞技",
+            "极限","滑板","攀岩","跑酷","动作",
+            "sports","basketball","football","running","fitness","workout",
+            "action","extreme","skateboard","climbing","parkour","race",
+        ],
+    },
+    "vlog": {
+        "keywords": [
+            "vlog","日常","记录","生活","旅行","美食","探店","分享","review",
+            "开箱","unboxing","haul","daily","lifestyle","travel","food",
+            "react","mukbang","prank","challenge",
+        ],
+    },
+}
+
+VIDEO_NOISE_SIGNALS = frozenset([
+    "测试","test","loop","repeated","random","noise","blank","empty",
+    "黑屏","乱码","无效","静音","static",
+])
+
 AUDIO_SCENE_WEIGHTS: dict = {
     "speech_medical":  1.40,   # 医疗语音转录: 数据极稀缺，ASR 价值最高
     "speech_legal":    1.25,   # 法庭/庭审录音
@@ -227,6 +305,12 @@ SCENE_COMPOSITE_WEIGHTS: dict = {
     "photo":        {"entropy":0.30,"snr":0.15,"structure":0.20,"scarcity":0.20,"llm_value":0.10,"shapley":0.05},
     "screenshot":   {"entropy":0.25,"snr":0.25,"structure":0.20,"scarcity":0.15,"llm_value":0.10,"shapley":0.05},
     "diagram":      {"entropy":0.20,"snr":0.15,"structure":0.30,"scarcity":0.20,"llm_value":0.10,"shapley":0.05},
+    # ★ 新增: 视频场景 composite_weights (由 VIDEO_SCENE_COMPOSITE_WEIGHTS 独立配置)
+    "documentary":   {"entropy":0.20,"snr":0.25,"structure":0.25,"scarcity":0.15,"llm_value":0.10,"shapley":0.05},
+    "lecture":       {"entropy":0.25,"snr":0.20,"structure":0.20,"scarcity":0.15,"llm_value":0.15,"shapley":0.05},
+    "cinematic":     {"entropy":0.20,"snr":0.30,"structure":0.25,"scarcity":0.10,"llm_value":0.10,"shapley":0.05},
+    "sports_action": {"entropy":0.30,"snr":0.15,"structure":0.30,"scarcity":0.10,"llm_value":0.10,"shapley":0.05},
+    "vlog":          {"entropy":0.25,"snr":0.20,"structure":0.20,"scarcity":0.15,"llm_value":0.15,"shapley":0.05},
     # ★ v4 新增: 音频场景独立 composite_weights
     # snr 权重最高 — 录音质量对 ASR/TTS 训练价值影响最大
     "speech_medical":  {"entropy":0.15,"snr":0.35,"structure":0.20,"scarcity":0.15,"llm_value":0.10,"shapley":0.05},
@@ -732,6 +816,105 @@ class SceneClassifier:
             ),
             method=method,
             audio_scene=audio_scene,   # ★ v4: 携带细粒度标签
+        )
+
+    # ----------------------------------------------------------------
+    # ★ 新增: 视频分类 (v5)
+    #   通道1 — 关键词信号 (描述文字)
+    #   通道2 — CLIP 视觉特征 (has_video=True 时，由 VideoAdapter 私有字段携带)
+    #   降级: 无视觉特征时退化为纯关键词 text_proxy
+    # ----------------------------------------------------------------
+    def classify_video(
+        self,
+        description: str,
+        clip_aesthetic: Optional[float] = None,    # VideoAdapter._clip_aesthetic
+        has_video:      bool = False,               # VideoAdapter._has_video
+        n_frames:       int  = 0,
+        scene_cut_density: float = 0.0,            # VideoAdapter's structure metric proxy
+    ) -> SceneResult:
+        """
+        视频场景分类器 v1:
+          scene_cut_density 高 → 镜头切换频繁 → cinematic / sports_action
+          clip_aesthetic 高  → 高画质 → cinematic / documentary
+          关键词优先         → 明确语义时覆盖视觉推断
+        """
+        desc_lower = description.lower()
+
+        # ── 噪声检测（优先）──────────────────────────────────────
+        noise_hits = sum(1 for kw in VIDEO_NOISE_SIGNALS if kw in desc_lower)
+        if noise_hits >= 2:
+            return self._noise()
+
+        # ── 通道1: 关键词评分 ─────────────────────────────────────
+        kw_scores: dict = {}
+        for scene, cfg in VIDEO_SCENE_SIGNALS.items():
+            kw_scores[scene] = sum(1 for kw in cfg["keywords"] if kw in desc_lower)
+
+        best_kw  = max(kw_scores, key=kw_scores.get)
+        kw_score = kw_scores[best_kw]
+
+        # ── 通道2: 视觉特征推断 ──────────────────────────────────
+        visual_scene: Optional[str] = None
+        if has_video and clip_aesthetic is not None and clip_aesthetic >= 0:
+            if scene_cut_density > 55 and clip_aesthetic >= 70:
+                visual_scene = "cinematic"
+            elif scene_cut_density > 55:
+                visual_scene = "sports_action"
+            elif clip_aesthetic >= 75:
+                visual_scene = "cinematic"
+            elif clip_aesthetic >= 55:
+                visual_scene = "documentary"
+            else:
+                visual_scene = "vlog"
+
+        # ── 融合 ─────────────────────────────────────────────────
+        if kw_score >= 2:
+            # 关键词信号强: text 信号覆盖 visual
+            scene  = best_kw
+            conf   = min(1.0, kw_score / 5.0)
+            method = "rule"
+        elif kw_score == 1 and visual_scene:
+            # 弱关键词 + 视觉特征: 取关键词（视觉辅助）
+            scene  = best_kw
+            conf   = 0.60
+            method = "fusion"
+        elif visual_scene:
+            # 无关键词: 纯视觉
+            scene  = visual_scene
+            conf   = 0.55
+            method = "fusion"
+        else:
+            # 完全降级: 兜底 vlog
+            scene  = "vlog"
+            conf   = 0.35
+            method = "text_proxy"
+
+        # 场景为 noise 时熔断
+        if scene == "noise":
+            return self._noise()
+
+        # TEV 场景映射 (visual/b2b 场景 → scoring.py AMM 场景)
+        tev_scene = VIDEO_SCENE_TO_TEV.get(scene, "chat_qa")
+
+        # quality_axis: 高动态场景 → structure; 高清晰场景 → snr; 叙事场景 → entropy
+        _QUALITY_AXIS = {
+            "documentary":   "entropy",
+            "lecture":       "llm_value",
+            "cinematic":     "snr",
+            "sports_action": "structure",
+            "vlog":          "entropy",
+        }
+
+        return SceneResult(
+            scene             = tev_scene,
+            confidence        = round(conf, 3),
+            weight_multiplier = VIDEO_SCENE_WEIGHTS.get(scene, 0.65),
+            quality_axis      = _QUALITY_AXIS.get(scene, "entropy"),
+            composite_weights = VIDEO_SCENE_COMPOSITE_WEIGHTS.get(
+                scene, VIDEO_SCENE_COMPOSITE_WEIGHTS["vlog"]
+            ),
+            method            = method,
+            audio_scene       = None,
         )
 
     def _noise(self) -> SceneResult:
