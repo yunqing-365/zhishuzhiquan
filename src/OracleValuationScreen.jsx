@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { apiClient, ApiError } from './api';
+import React, { useState, useEffect, useCallback } from 'react';
+import { apiClient, ApiError, useWsValuate } from './api';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts';
 import { Activity, ShieldCheck, FileText, Network, CheckCircle2, ArrowRight, Tag, Layers, FlaskConical, Mic, Lock, Eye, KeyRound } from 'lucide-react';
 
@@ -211,15 +211,36 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
   const [dataSource, setDataSource]           = useState(null);
   const [apiError, setApiError]               = useState(null);
 
+  // ★ Stage 2: WebSocket 实时进度推送
+  const { connect: wsConnect, progress: wsProgress, result: wsResult } = useWsValuate();
+  const WS_STAGE_STEP = { init: 0, hash: 0, scene: 1, score: 3, zk: 4, save: 4, done: 4 };
+
   const EXEC_STEPS = [
     `[Stage 1] 模态路由 → [${(ADAPTER_LABEL[assetCategory]?.label || 'Adapter').toUpperCase()}] 初始化，向量知识库接入...`,
     sceneOverride
       ? `[Stage 2] 场景覆盖已激活 → 跳过 SceneClassifier，强制场景: ${sceneOverride}`
       : `[Stage 2] SceneClassifier v4 dual-channel → 识别 ${assetCategory === 'audio' ? '音频场景 (声学×0.65 + 文本KWS×0.35)' : assetCategory === 'video' ? '视频场景 (CLIP视觉+关键词 hybrid)' : '文本/图像场景子类型 (rule+ML hybrid)'}...`,
-    `[Stage 3] 场景自适应特征提取 → ${assetCategory === 'audio' ? 'MFCC嵌入 + PESQ代理SNR + 频谱熵' : assetCategory === 'image' ? 'pHash + LAION美学 + DWT' : assetCategory === 'video' ? 'CLIP视觉流 + ffmpeg音轨→AudioAdapter 双流融合 (α=0.60/β=0.40)' : 'Shannon熵 + GraphRAG + SimHash'}...`,
-    `[Stage 4] TEV 双层乘数 → 模态基础倍率 × 场景权重 → 复合评分...`,
-    '[Stage 5] AMM 联合曲线 + KNN-Shapley + 实物期权 → 统一定价上链...',
-  ];
+    `[Stage 3] 场景自适应特征提取 → ${assetCategory === 'audio' ? 'MFCC嵌入 + PESQ代理SNR + 频谱熵' : assetCategory === 'image' ? 'pHash + LAION美学 + DWT' : assetCategory === 'video'   // 监听 WS 进度 → 推进 calcStep
+  useEffect(() => {
+    if (!wsProgress.length) return;
+    const latest = wsProgress[wsProgress.length - 1];
+    const stepIdx = WS_STAGE_STEP[latest.stage] ?? 0;
+    setCalcStep(prev => Math.max(prev, stepIdx));
+  }, [wsProgress]);
+
+  // 监听 WS 结果 → 立即渲染（无 4.2s 硬等待）
+  useEffect(() => {
+    if (!wsResult) return;
+    const metrics = wsResult.metrics?.map?.(m => ({
+      subject: m.subject ?? m.name ?? '维度',
+      score: Number(m.score ?? m.value ?? 0),
+      fullMark: m.fullMark ?? 100,
+    })) ?? null;
+    setDataSource('api');
+    setValuationResult(wsResult);
+    if (metrics) setChartData(metrics);
+    setIsCalculating(false);
+  }, [wsResult]);
 
   useEffect(() => {
     const defaultNames = {
@@ -230,34 +251,32 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
     }[assetCategory] || [];
     setChartData(defaultNames.map(n => ({ subject: n, score: 0, fullMark: 100 })));
 
-    let cur = 0;
-    const ticker = setInterval(() => {
-      if (cur < EXEC_STEPS.length) { setCalcStep(cur); cur++; }
-    }, 750);
-
-    // ★ v5: 归一化后端 metrics 格式
-    const normalizeMetrics = (raw) => {
-      if (!raw || !Array.isArray(raw)) return null;
-      // 后端格式: [{subject, score, fullMark}] 或 [{name, value}]
-      return raw.map(m => ({
-        subject:  m.subject ?? m.name ?? m.label ?? '维度',
-        score:    Number(m.score  ?? m.value ?? 0),
-        fullMark: m.fullMark ?? 100,
-      }));
+    const payload = {
+      asset_category: assetCategory,
+      description:    assetData,
+      is_zk_mode:     isZkMode,
+      scene_override: sceneOverride ?? null,
+      audio_data:     audioData ?? null,
+      image_data:     imageData ?? null,
+      video_data:     videoData ?? null,
     };
 
-    const fetchValuation = async () => {
-      // ★ v6: 使用统一 apiClient，超时/重试/错误分类统一处理
+    // ★ Stage 2: 优先 WebSocket；5s 内无进度则降级到 REST + mock
+    const wsCleanup = wsConnect(payload);
+    let degraded = false;
+
+    const degradeTimer = setTimeout(async () => {
+      if (degraded) return;
+      degraded = true;
+      // REST 降级：带动画 ticker
+      let cur = 0;
+      const ticker = setInterval(() => {
+        if (cur < 5) { setCalcStep(cur); cur++; }
+      }, 750);
+      const normalizeMetrics = (raw) =>
+        raw?.map?.(m => ({ subject: m.subject ?? m.name ?? '维度', score: Number(m.score ?? m.value ?? 0), fullMark: m.fullMark ?? 100 })) ?? null;
       try {
-        const data = await apiClient.valuate({
-          asset_category: assetCategory,
-          description:    assetData,
-          is_zk_mode:     isZkMode,
-          scene_override: sceneOverride ?? null,
-          audio_data:     audioData ?? null,
-          image_data:     imageData ?? null,  // ★ v6: 真实图像 base64
-          video_data:     videoData ?? null,  // ★ v5: 视频 base64
-        });
+        const data = await apiClient.valuate(payload);
         const metrics = normalizeMetrics(data.metrics);
         setTimeout(() => {
           clearInterval(ticker);
@@ -265,20 +284,27 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
           setValuationResult(data);
           if (metrics) setChartData(metrics);
           setIsCalculating(false);
-        }, 4200);
+        }, 800);
       } catch (err) {
-        // ApiError.type: 'TIMEOUT' | 'NETWORK' | 'SERVER'
         const errMsg = err instanceof ApiError
-          ? (err.type === 'TIMEOUT'  ? `后端连接超时 (8s)` :
-             err.type === 'NETWORK'  ? `网络错误: ${err.message}` :
-             err.type === 'SERVER'   ? `服务器错误 ${err.status}` : err.message)
+          ? (err.type === 'TIMEOUT' ? `后端连接超时 (8s)` : err.type === 'NETWORK' ? `网络错误: ${err.message}` : `服务器错误 ${err.status ?? ''}`)
           : (err.message || '未知错误');
         const mock = buildMock(assetCategory, sceneOverride);
-        setTimeout(() => {
-          clearInterval(ticker);
-          setDataSource('mock');
-          setApiError(errMsg);
-          setValuationResult(mock);
+        clearInterval(ticker);
+        setDataSource('mock');
+        setApiError(errMsg);
+        setValuationResult(mock);
+        setChartData(mock.metrics);
+        setIsCalculating(false);
+      }
+    }, 5000);
+
+    return () => {
+      clearTimeout(degradeTimer);
+      degraded = true;
+      if (typeof wsCleanup === 'function') wsCleanup();
+    };
+  }, []);          setValuationResult(mock);
           setChartData(mock.metrics);
           setIsCalculating(false);
         }, 4200);

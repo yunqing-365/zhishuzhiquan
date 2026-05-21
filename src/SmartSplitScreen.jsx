@@ -2,9 +2,11 @@ import React, { useState, useEffect, useCallback } from 'react';
 import {
   Wallet, ShieldCheck, Database, Link as LinkIcon, ExternalLink,
   Hexagon, Zap, CheckCircle, Activity, Server, TrendingUp, Mic, AlertTriangle,
+  FileDown,
 } from 'lucide-react';
 import WalletButton               from './web3/WalletButton';
 import { useAIEchoContract }      from './web3/useAIEchoContract';
+import ValuationReport            from './ValuationReport';
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceDot, ReferenceLine,
@@ -103,6 +105,7 @@ const resolveAmmConfig = (valuationResult, assetCategory) => {
 
 // ── SmartSplitScreen（v4：完全由 valuationResult 驱动，消灭 hardcode）─
 const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, onBack }) => {
+  const [showReport, setShowReport] = useState(false);
   // ── 从 oracle 结果提取真实定价参数 ────────────────────────────────
   const fv           = valuationResult?.final_valuation;
   const baseValue    = fv?.base_value    ?? (assetCategory === 'audio' ? 18600 : assetCategory === 'image' ? 9250 : assetCategory === 'video' ? 96400 : 1200);
@@ -249,6 +252,14 @@ const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, 
             )}
             <button onClick={onRestart} className="text-sm text-slate-400 hover:text-purple-400 transition-colors border border-slate-700 hover:border-purple-500/50 px-5 py-2 rounded-xl bg-slate-800/50 shadow-sm">
               重置沙箱 Demo
+            </button>
+            {/* ★ Stage 2: 导出估值报告 */}
+            <button
+              onClick={() => setShowReport(true)}
+              className="flex items-center gap-1.5 text-sm text-slate-400 hover:text-emerald-400 transition-colors border border-slate-700 hover:border-emerald-500/50 px-4 py-2 rounded-xl bg-slate-800/50 shadow-sm"
+            >
+              <FileDown className="w-3.5 h-3.5" />
+              导出凭证
             </button>
           </div>
         </div>
@@ -432,6 +443,14 @@ const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, 
           </div>
         </div>
       </div>
+
+      {/* ★ Stage 2: 估值凭证导出弹窗 */}
+      <ValuationReport
+        isOpen={showReport}
+        onClose={() => setShowReport(false)}
+        valuationResult={valuationResult}
+        assetCategory={assetCategory}
+      />
     </div>
   );
 };

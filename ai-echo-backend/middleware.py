@@ -8,8 +8,15 @@ middleware.py — 安全中间件
   - /api/valuate 无限流保护，单一 IP 可无限刷估值耗尽算力
   - 无请求日志，生产环境完全黑盒
 
+Stage 2 新增:
+  - ApiKeyMiddleware: Bearer Token 认证，保护 B2B 接口
+    配置方式: 环境变量 AI_ECHO_API_KEY（逗号分隔多 key）
+    受保护路由: /api/batch_valuate, /ws/valuate（WebSocket 握手）
+    无 key 配置时自动旁路（开发模式）
+
 提供:
   - RateLimiter: 基于内存的令牌桶限流（无 Redis 依赖，单进程适用）
+  - ApiKeyMiddleware: Bearer Token / X-API-Key 认证（Stage 2 新增）
   - setup_security: 一键挂载所有中间件到 FastAPI app
   - RequestLogger: 结构化请求日志（耗时 + 状态码 + 路由）
 
@@ -18,6 +25,7 @@ middleware.py — 安全中间件
     setup_security(app)
 """
 
+import os
 import time
 import logging
 from collections import defaultdict
@@ -136,6 +144,92 @@ class RequestLoggerMiddleware(BaseHTTPMiddleware):
 
 
 # ── 一键挂载所有安全中间件 ────────────────────────────────────────────
+
+
+# ── API Key 认证中间件（Stage 2: 保护 B2B 接口）──────────────────────
+# 受保护路由: /api/batch_valuate, /ws/valuate
+# 认证方式 (任一即可):
+#   Header: Authorization: Bearer <key>
+#   Header: X-API-Key: <key>
+#   Query:  ?api_key=<key>
+# 配置: 环境变量 AI_ECHO_API_KEY，逗号分隔多个 key
+#   export AI_ECHO_API_KEY="key_prod_abc123,key_test_xyz789"
+# 无配置时自动开放（开发模式），并打印警告。
+
+_PROTECTED_ROUTES = frozenset([
+    "/api/batch_valuate",
+    "/ws/valuate",
+])
+
+
+def _load_api_keys() -> frozenset:
+    """从环境变量加载允许的 API Key 集合。空集合 = 开放模式。"""
+    raw = os.environ.get("AI_ECHO_API_KEY", "").strip()
+    if not raw:
+        return frozenset()
+    keys = frozenset(k.strip() for k in raw.split(",") if k.strip())
+    return keys
+
+
+_API_KEYS: frozenset = _load_api_keys()
+if not _API_KEYS:
+    logger.warning(
+        ">> [security] AI_ECHO_API_KEY 未配置，/api/batch_valuate 和 /ws/valuate 开放访问（开发模式）"
+    )
+else:
+    logger.info(">> [security] API Key 认证已启用，保护路由: %s", ", ".join(_PROTECTED_ROUTES))
+
+
+def _extract_api_key(request: Request) -> Optional[str]:
+    """按优先级提取请求中携带的 API Key。"""
+    # 1. Authorization: Bearer <key>
+    auth = request.headers.get("Authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    # 2. X-API-Key: <key>
+    x_key = request.headers.get("X-API-Key", "").strip()
+    if x_key:
+        return x_key
+    # 3. ?api_key=<key>  (WebSocket 握手常用)
+    q_key = request.query_params.get("api_key", "").strip()
+    if q_key:
+        return q_key
+    return None
+
+
+class ApiKeyMiddleware(BaseHTTPMiddleware):
+    """
+    Bearer Token / X-API-Key 认证中间件。
+    仅拦截 _PROTECTED_ROUTES 中的路径，其余路由直接放行。
+    _API_KEYS 为空时（开发模式）一律放行。
+    """
+    async def dispatch(self, request: Request, call_next):
+        if not _API_KEYS:
+            return await call_next(request)
+
+        path = request.url.path
+        if path not in _PROTECTED_ROUTES:
+            return await call_next(request)
+
+        key = _extract_api_key(request)
+        if key and key in _API_KEYS:
+            return await call_next(request)
+
+        logger.warning(
+            "[security] API Key 验证失败: %s %s [%s]",
+            request.method, path, _client_key(request),
+        )
+        return JSONResponse(
+            status_code=401,
+            content={
+                "error":   "unauthorized",
+                "message": "此接口需要有效的 API Key。请在 Authorization: Bearer <key> 或 X-API-Key: <key> 中提供。",
+                "docs":    "https://docs.ai-echo.io/authentication",
+            },
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 def setup_security(app) -> None:
     """
     在 oracle_engine.py 的 FastAPI app 上挂载安全层。
@@ -147,6 +241,8 @@ def setup_security(app) -> None:
     """
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(RequestLoggerMiddleware)
-    logger.info(">> [security] 限流 + 请求日志中间件已挂载")
+    # ★ Stage 2: API Key 认证（挂载顺序: 先认证，后限流）
+    app.add_middleware(ApiKeyMiddleware)
+    logger.info(">> [security] 限流 + 请求日志 + API Key 认证中间件已挂载")
     for path, (cap, rate) in ROUTE_LIMITS.items():
         logger.info("   %s: burst=%d, refill=%.2f/s", path, cap, rate)
