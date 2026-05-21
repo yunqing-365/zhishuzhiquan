@@ -46,6 +46,9 @@ def _migrate_db(conn: sqlite3.Connection) -> None:
     """
     migrations = [
         "ALTER TABLE valuations ADD COLUMN zk_commitment TEXT",
+        # ★ v6: Stage C 双流诊断字段（视频模态）
+        "ALTER TABLE valuations ADD COLUMN video_stage TEXT",
+        "ALTER TABLE valuations ADD COLUMN has_audio_stream INTEGER DEFAULT 0",
     ]
     for sql in migrations:
         try:
@@ -75,7 +78,9 @@ def init_db() -> bool:
                     creator_ratio     REAL,
                     vector_distance   REAL,
                     description_preview TEXT,
-                    full_result       TEXT         -- JSON 完整 response
+                    full_result       TEXT,        -- JSON 完整 response
+                    video_stage       TEXT,        -- 视频: 'A'|'B'|'C'
+                    has_audio_stream  INTEGER DEFAULT 0  -- 视频: Stage C 双流成功=1
                 )
             """)
             # 快速查询索引
@@ -124,8 +129,9 @@ def save_valuation(
                     timestamp, asset_hash, modality, scene, audio_scene,
                     composite_quality, dynamic_price, base_value,
                     option_premium, creator_ratio, vector_distance,
-                    description_preview, full_result, zk_commitment
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    description_preview, full_result, zk_commitment,
+                    video_stage, has_audio_stream
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     int(time.time()),
@@ -141,7 +147,9 @@ def save_valuation(
                     round(vector_distance, 4),
                     preview,
                     json.dumps(result, ensure_ascii=False),
-                    zk_commitment,   # ★ v3: bytes32 hex 或 NULL
+                    zk_commitment,
+                    result.get("meta", {}).get("video_stage"),            # ★ v6
+                    int(bool(result.get("meta", {}).get("has_audio_stream"))),  # ★ v6
                 ),
             )
             row_id = cur.lastrowid
@@ -173,7 +181,7 @@ def get_history(limit: int = 20, modality: Optional[str] = None) -> list:
                     SELECT id, timestamp, asset_hash, modality, scene, audio_scene,
                            composite_quality, dynamic_price, base_value,
                            option_premium, creator_ratio, vector_distance,
-                           description_preview
+                           description_preview, video_stage, has_audio_stream
                     FROM valuations
                     WHERE modality = ?
                     ORDER BY timestamp DESC LIMIT ?
@@ -186,7 +194,7 @@ def get_history(limit: int = 20, modality: Optional[str] = None) -> list:
                     SELECT id, timestamp, asset_hash, modality, scene, audio_scene,
                            composite_quality, dynamic_price, base_value,
                            option_premium, creator_ratio, vector_distance,
-                           description_preview
+                           description_preview, video_stage, has_audio_stream
                     FROM valuations
                     ORDER BY timestamp DESC LIMIT ?
                     """,

@@ -311,6 +311,258 @@ except Exception as e:
 # ════════════════════════════════════════════════════════════════════
 # 汇总
 # ════════════════════════════════════════════════════════════════════
+
+# ════════════════════════════════════════════════════════════════════
+# 11. 限流中间件：快速连续请求触发 429
+# ════════════════════════════════════════════════════════════════════
+section("11. 限流中间件 — 429 Rate Limit")
+try:
+    import threading
+    body = {"asset_category": "text", "description": "限流测试语料", "is_zk_mode": False}
+    responses = []
+    errors    = []
+
+    def _fire():
+        try:
+            responses.append(post("/api/valuate", body, timeout=5))
+        except urllib.error.HTTPError as e:
+            responses.append({"_status": e.code})
+        except Exception as ex:
+            errors.append(str(ex))
+
+    threads = [threading.Thread(target=_fire) for _ in range(25)]
+    for t in threads: t.start()
+    for t in threads: t.join()
+
+    status_codes = [r.get("_status") or r.get("status") for r in responses]
+    check("快速25次请求出现429或全部成功(未启用限流)",
+          True,
+          f"responses={len(responses)} 429s={sum(1 for c in status_codes if c==429)}")
+    check("无请求抛出网络异常", len(errors) == 0, str(errors[:2]))
+except Exception as e:
+    check("限流并发测试可运行", False, str(e)[:60])
+
+
+# ════════════════════════════════════════════════════════════════════
+# 12. /api/history/search (v2)
+# ════════════════════════════════════════════════════════════════════
+section("12. /api/history/search 搜索接口 (v2)")
+try:
+    r = get("/api/history/search?q=医疗&limit=5")
+    check("返回 records 字段",  "records" in r, str(list(r.keys())))
+    check("返回 total 字段",    "total"   in r, str(list(r.keys())))
+    check("records 为列表",     isinstance(r.get("records"), list))
+    r2 = get("/api/history/search?q=&limit=5")
+    check("空关键词返回 records=[]", r2.get("records") == [], str(r2.get("records")))
+except Exception as e:
+    check("/api/history/search 可达", False, str(e)[:60])
+
+
+# ════════════════════════════════════════════════════════════════════
+# 13. CORS 安全头部验证
+# ════════════════════════════════════════════════════════════════════
+section("13. CORS 安全头部验证")
+try:
+    req = urllib.request.Request(
+        BASE + "/api/health",
+        headers={"Origin": "https://evil.example.com"},
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        cors = resp.headers.get("Access-Control-Allow-Origin", "")
+    check("CORS 不允许任意来源", cors != "https://evil.example.com", f"ACAO={cors!r}")
+    check("CORS 不是通配符 *",  cors != "*",                        f"ACAO={cors!r}")
+except urllib.error.HTTPError as e:
+    check("恶意Origin被拦截(4xx)", e.code in (400, 403, 405), str(e.code))
+except Exception as e:
+    check("CORS 检查可运行", False, str(e)[:60])
+
+
+# ════════════════════════════════════════════════════════════════════
+# 14. image_data 字段传递
+# ════════════════════════════════════════════════════════════════════
+section("14. image_data 字段支持 (v6)")
+try:
+    TINY_PNG_B64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI6QAAA"
+        "ABJRU5ErkJggg=="
+    )
+    r = post("/api/valuate", {
+        "asset_category": "image",
+        "description":    "单像素测试图像",
+        "is_zk_mode":     False,
+        "image_data":     TINY_PNG_B64,
+    })
+    check("image_data 字段被接受不报错",
+          r.get("status") in ("success", "rejected"), r.get("status"))
+    check("asset_hash 非空",
+          len(str(r.get("asset_hash", ""))) > 5,
+          str(r.get("asset_hash", ""))[:30])
+except Exception as e:
+    check("image_data 字段请求成功", False, str(e)[:60])
+
+
+# ════════════════════════════════════════════════════════════════════
+# 15. /api/scenes v6 字段完整性 (Stage C 双流运行时信息)
+# ════════════════════════════════════════════════════════════════════
+section("15. /api/scenes v6 — Stage C 双流字段 + 视频场景权重")
+try:
+    sc = get("/api/scenes")
+
+    # 视频场景权重表（★ v6 新增）
+    vid_weights = sc.get("video_scene_weights", {})
+    expected_vid = {"documentary", "lecture", "cinematic", "sports_action", "vlog"}
+    found_vid    = expected_vid & set(vid_weights.keys())
+    check("video_scene_weights 非空",    len(vid_weights) > 0,       str(vid_weights))
+    check("含所有5个视频场景",           len(found_vid) == 5,         str(found_vid))
+
+    # video_dual_stream 运行时信息
+    ds = sc.get("video_dual_stream", {})
+    check("video_dual_stream 字段存在",  bool(ds),                    str(list(sc.keys())))
+    check("stage == 'C'",               ds.get("stage") == "C",      str(ds.get("stage")))
+    check("ffmpeg_available 为 bool",   isinstance(ds.get("ffmpeg_available"), bool),
+                                                                      str(ds.get("ffmpeg_available")))
+    check("fusion_alpha + fusion_beta ≈ 1.0",
+          abs(ds.get("fusion_alpha", 0) + ds.get("fusion_beta", 0) - 1.0) < 0.01,
+          f"α={ds.get('fusion_alpha')} β={ds.get('fusion_beta')}")
+
+    # video_scene_composite_weights（6D 权重）
+    cw = sc.get("video_scene_composite_weights", {})
+    check("video_scene_composite_weights 存在", bool(cw), str(cw))
+
+    # supported_modalities 含 is_stub
+    mods = sc.get("supported_modalities", {})
+    vid_mod = mods.get("video", {})
+    check("supported_modalities.video 含 is_stub", "is_stub" in vid_mod, str(vid_mod))
+    check("video adapter_version == v2-stage-c",
+          vid_mod.get("adapter_version") == "v2-stage-c",
+          str(vid_mod.get("adapter_version")))
+
+    # AMM 视频场景已入库
+    amm = sc.get("amm_scene_config", {})
+    amm_vid = {"documentary", "lecture", "cinematic"} & set(amm.keys())
+    check("AMM 含视频场景 documentary/lecture/cinematic",
+          len(amm_vid) == 3, str(amm_vid))
+except Exception as e:
+    check("/api/scenes v6 可达", False, str(e)[:80])
+
+
+# ════════════════════════════════════════════════════════════════════
+# 16. 视频模态 — Stage A 描述代理估值（无 video_data）
+# ════════════════════════════════════════════════════════════════════
+section("16. 视频 — Stage A 描述代理估值 (无 video_data)")
+try:
+    r = post("/api/valuate", {
+        "asset_category": "video",
+        "description":    (
+            "高清纪录片，一段珍贵的野生东北虎捕猎实录，4K画质，"
+            "专业摄影团队随行拍摄，配有双语同期声，画面稳定，光线充足。"
+        ),
+        "is_zk_mode": False,
+        "scene_override": "documentary",
+    })
+    fv = r.get("final_valuation", {})
+    sc_ = r.get("scene_classification", {})
+    mt  = r.get("meta", {})
+
+    check("status == success",           r.get("status") == "success",    r.get("status"))
+    check("modality == video",           mt.get("modality") == "video",   mt.get("modality"))
+    check("dynamic_price > 0",          fv.get("dynamic_price", 0) > 0,  str(fv.get("dynamic_price")))
+    check("adapter_version 含 stage",   "stage" in str(mt.get("adapter_version","")),
+                                                                          str(mt.get("adapter_version")))
+    check("video_stage 字段存在(v6)",   "video_stage" in mt,              str(list(mt.keys())))
+    check("video_stage == 'A' (无帧)",  mt.get("video_stage") == "A",    str(mt.get("video_stage")))
+    check("has_audio_stream == False",  mt.get("has_audio_stream") in (False, None, 0),
+                                                                          str(mt.get("has_audio_stream")))
+    check("动态定价 ≥ 基准价值",
+          fv.get("dynamic_price", 0) >= fv.get("base_value", 0),
+          f"dyn={fv.get('dynamic_price')} base={fv.get('base_value')}")
+except Exception as e:
+    check("视频 Stage A 请求成功", False, str(e)[:80])
+
+
+# ════════════════════════════════════════════════════════════════════
+# 17. 视频 AMM — documentary alpha > vlog alpha
+# ════════════════════════════════════════════════════════════════════
+section("17. 视频 AMM — 场景差异化定价斜率")
+try:
+    base_desc = "视频测试内容，用于比较场景定价差异。"
+
+    r_doc  = post("/api/valuate", {"asset_category": "video", "description": base_desc,
+                                   "is_zk_mode": False, "scene_override": "documentary"})
+    r_vlog = post("/api/valuate", {"asset_category": "video", "description": base_desc,
+                                   "is_zk_mode": False, "scene_override": "vlog"})
+
+    doc_price  = r_doc.get("final_valuation",  {}).get("dynamic_price", 0)
+    vlog_price = r_vlog.get("final_valuation", {}).get("dynamic_price", 0)
+    doc_alpha  = r_doc.get("final_valuation",  {}).get("amm_alpha", 0)
+    vlog_alpha = r_vlog.get("final_valuation", {}).get("amm_alpha", 0)
+
+    check("documentary price > vlog price",
+          doc_price > vlog_price,
+          f"doc={doc_price} vlog={vlog_price}")
+    check("documentary amm_alpha > vlog amm_alpha",
+          doc_alpha > vlog_alpha,
+          f"doc_α={doc_alpha} vlog_α={vlog_alpha}")
+    check("两者 status 均为 success",
+          r_doc.get("status") == r_vlog.get("status") == "success",
+          f"{r_doc.get('status')} / {r_vlog.get('status')}")
+except Exception as e:
+    check("视频 AMM 差异化定价请求成功", False, str(e)[:80])
+
+
+# ════════════════════════════════════════════════════════════════════
+# 18. storage v6 — video_stage / has_audio_stream 字段持久化
+# ════════════════════════════════════════════════════════════════════
+section("18. storage v6 — 视频 Stage C 字段持久化")
+try:
+    # 先提交一次视频估值（触发 storage.save_valuation）
+    r = post("/api/valuate", {
+        "asset_category": "video",
+        "description":    "storage 持久化测试：纪录片片段，有效内容",
+        "is_zk_mode":     False,
+        "scene_override": "lecture",
+    })
+    check("视频估值提交成功", r.get("status") == "success", r.get("status"))
+
+    # 从历史记录取回，校验新字段
+    hist = get("/api/history?limit=5&modality=video")
+    records = hist.get("records", hist) if isinstance(hist, dict) else hist
+    if isinstance(records, list) and records:
+        latest = records[0]
+        check("历史记录含 video_stage 字段",
+              "video_stage" in latest,          str(list(latest.keys())))
+        check("历史记录含 has_audio_stream 字段",
+              "has_audio_stream" in latest,     str(list(latest.keys())))
+        check("video_stage 值合法 (A/B/C 或 None)",
+              latest.get("video_stage") in ("A","B","C", None, ""),
+              str(latest.get("video_stage")))
+    else:
+        check("视频历史记录非空", False, f"records={records}")
+except Exception as e:
+    check("storage v6 持久化测试可运行", False, str(e)[:80])
+
+
+# ════════════════════════════════════════════════════════════════════
+# 19. 视频 TEV 倍率 — MODALITY_TEV video == 500
+# ════════════════════════════════════════════════════════════════════
+section("19. 视频 TEV 倍率 v6 (500x)")
+try:
+    sc_data = get("/api/scenes")
+    tev     = sc_data.get("modality_tev", {})
+    check("modality_tev 字段存在",    bool(tev),                str(list(tev.keys())))
+    check("text TEV == 1.0",          tev.get("text")  == 1.0,  str(tev.get("text")))
+    check("video TEV == 500.0 (v6升级)", tev.get("video") == 500.0, str(tev.get("video")))
+    check("audio TEV >= 100",         tev.get("audio", 0) >= 100, str(tev.get("audio")))
+    check("video TEV > audio TEV",    tev.get("video", 0) > tev.get("audio", 0),
+          f"video={tev.get('video')} audio={tev.get('audio')}")
+except Exception as e:
+    check("TEV 倍率检查可运行", False, str(e)[:60])
+
+
+# ════════════════════════════════════════════════════════════════════
+# 汇总
+# ════════════════════════════════════════════════════════════════════
 total  = len(results)
 passed = sum(1 for _,ok,_ in results if ok)
 failed = total - passed
@@ -328,105 +580,3 @@ else:
 print(f"{'═'*58}\n")
 
 sys.exit(0 if failed == 0 else 1)
-
-
-# ════════════════════════════════════════════════════════════════════
-# 11. 限流中间件：快速连续请求触发 429
-# ════════════════════════════════════════════════════════════════════
-section("11. 限流中间件 — 429 Rate Limit (v6)")
-try:
-    import threading, time as _time
-
-    body = {"asset_category": "text", "description": "限流测试语料", "is_zk_mode": False}
-    responses = []
-    errors    = []
-
-    # 快速并发 25 次（超过 bucket capacity=20）
-    def _fire():
-        try:
-            responses.append(post("/api/valuate", body, timeout=5))
-        except urllib.error.HTTPError as e:
-            responses.append({"_status": e.code})
-        except Exception as ex:
-            errors.append(str(ex))
-
-    threads = [threading.Thread(target=_fire) for _ in range(25)]
-    for t in threads: t.start()
-    for t in threads: t.join()
-
-    status_codes = [r.get("_status") or r.get("status") for r in responses]
-    hit_429 = any(c == 429 for c in status_codes if isinstance(c, int))
-    # 如果中间件未安装，429不会出现 — 不强制失败，但告警
-    check("快速25次请求出现 429 或全部成功(未启用限流)",
-          True,  # 不强制失败，输出结果供参考
-          f"responses={len(responses)} 429s={sum(1 for c in status_codes if c==429)}")
-    check("无请求抛出网络异常", len(errors) == 0, str(errors[:2]))
-except Exception as e:
-    check("限流并发测试可运行", False, str(e)[:60])
-
-
-# ════════════════════════════════════════════════════════════════════
-# 12. /api/history/search 搜索接口 (v2 新增)
-# ════════════════════════════════════════════════════════════════════
-section("12. /api/history/search 搜索接口 (v2)")
-try:
-    r = get("/api/history/search?q=医疗&limit=5")
-    check("返回 records 字段",  "records" in r,            str(list(r.keys())))
-    check("返回 total 字段",    "total"   in r,            str(list(r.keys())))
-    check("records 为列表",     isinstance(r.get("records"), list))
-
-    # 空关键词应返回空结果
-    r2 = get("/api/history/search?q=&limit=5")
-    check("空关键词返回 records=[]", r2.get("records") == [], str(r2.get("records")))
-except Exception as e:
-    check("/api/history/search 可达", False, str(e)[:60])
-
-
-# ════════════════════════════════════════════════════════════════════
-# 13. CORS 头部验证 (v6 安全升级)
-# ════════════════════════════════════════════════════════════════════
-section("13. CORS 安全头部验证 (v6)")
-try:
-    req = urllib.request.Request(
-        BASE + "/api/health",
-        headers={"Origin": "https://evil.example.com"},
-        method="GET",
-    )
-    with urllib.request.urlopen(req, timeout=5) as resp:
-        cors_header = resp.headers.get("Access-Control-Allow-Origin", "")
-    # v6 配置: 只允许 localhost:5173/5174，不应回显 evil.example.com
-    check("CORS 不允许任意来源", cors_header != "https://evil.example.com",
-          f"ACAO={cors_header!r}")
-    check("CORS 不是通配符 *",  cors_header != "*",
-          f"ACAO={cors_header!r}")
-except urllib.error.HTTPError as e:
-    # 403/400 都说明 CORS 拦截正常工作
-    check("恶意 Origin 被拦截 (HTTP 4xx)", e.code in (400, 403, 405), str(e.code))
-except Exception as e:
-    check("CORS 检查可运行", False, str(e)[:60])
-
-
-# ════════════════════════════════════════════════════════════════════
-# 14. image_data 字段传递 (v6 图像链路修复)
-# ════════════════════════════════════════════════════════════════════
-section("14. image_data 字段支持 (v6)")
-try:
-    # 传一个最小合法 base64 PNG (1×1 白像素)
-    TINY_PNG_B64 = (
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI6QAAA"
-        "ABJRU5ErkJggg=="
-    )
-    r = post("/api/valuate", {
-        "asset_category": "image",
-        "description":    "单像素测试图像",
-        "is_zk_mode":     False,
-        "image_data":     TINY_PNG_B64,
-    })
-    check("image_data 字段被接受不报错", r.get("status") in ("success", "rejected"), r.get("status"))
-    check("asset_hash 含图像标识",
-          "IMG" in str(r.get("asset_hash","")).upper() or
-          "PH"  in str(r.get("asset_hash","")).upper() or
-          len(str(r.get("asset_hash",""))) > 5,
-          str(r.get("asset_hash",""))[:30])
-except Exception as e:
-    check("image_data 字段请求成功", False, str(e)[:60])

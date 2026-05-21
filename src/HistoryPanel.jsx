@@ -73,6 +73,15 @@ const HistoryCard = ({ record, onClick, onDelete }) => {
               {record.audio_scene && (
                 <span className="text-[9px] text-slate-500 font-mono">{record.audio_scene}</span>
               )}
+              {/* ★ v6: Stage C 双流徽标（视频记录）*/}
+              {record.modality === 'video' && record.video_stage && (
+                <span className={`text-[9px] font-mono px-1 py-0.5 rounded border
+                  ${record.has_audio_stream
+                    ? 'border-teal-700/40 bg-teal-950/30 text-teal-400'
+                    : 'border-violet-700/30 bg-violet-950/20 text-violet-400'}`}>
+                  Stage {record.video_stage}{record.has_audio_stream ? ' ⚡' : ''}
+                </span>
+              )}
               {record.zk_commitment && (
                 <span
                   className="flex items-center gap-0.5 text-[9px] font-mono px-1 py-0.5 rounded border border-purple-500/25 text-purple-500 bg-purple-950/20"

@@ -3,24 +3,33 @@ import { apiClient, ApiError } from './api';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts';
 import { Activity, ShieldCheck, FileText, Network, CheckCircle2, ArrowRight, Tag, Layers, FlaskConical, Mic, Lock, Eye, KeyRound } from 'lucide-react';
 
-// 场景标签配置（与后端 scene_classifier.py + audio_adapter.py 完整同步）
+// 场景标签配置（与后端 scene_classifier.py + audio_adapter.py + VIDEO_SCENE_WEIGHTS 完整同步）
 const SCENE_LABELS = {
+  // ── 文本场景 ──────────────────────────────────────────────────────
   medical_sft:  { label: '医疗 SFT',   color: 'text-red-400',     bg: 'bg-red-900/20 border-red-500/30',       mult: '1.35×' },
   legal_doc:    { label: '法律文书',   color: 'text-orange-400',  bg: 'bg-orange-900/20 border-orange-500/30', mult: '1.20×' },
   code_tech:    { label: '代码技术',   color: 'text-cyan-400',    bg: 'bg-cyan-900/20 border-cyan-500/30',     mult: '1.10×' },
   creative:     { label: '创意写作',   color: 'text-pink-400',    bg: 'bg-pink-900/20 border-pink-500/30',     mult: '0.90×' },
   chat_qa:      { label: '问答对话',   color: 'text-blue-400',    bg: 'bg-blue-900/20 border-blue-500/30',     mult: '0.80×' },
+  // ── 图像场景 ──────────────────────────────────────────────────────
   illustration: { label: '原创插画',   color: 'text-amber-400',   bg: 'bg-amber-900/20 border-amber-500/30',   mult: '1.50×' },
   photo:        { label: '摄影作品',   color: 'text-yellow-400',  bg: 'bg-yellow-900/20 border-yellow-500/30', mult: '1.00×' },
   screenshot:   { label: '截图素材',   color: 'text-slate-400',   bg: 'bg-slate-900/30 border-slate-600/30',   mult: '0.25×' },
   diagram:      { label: '图表图解',   color: 'text-violet-400',  bg: 'bg-violet-900/20 border-violet-500/30', mult: '0.55×' },
+  // ── 通用/噪声 ────────────────────────────────────────────────────
   noise:        { label: '噪声/废话',  color: 'text-red-500',     bg: 'bg-red-950/30 border-red-700/30',       mult: '0.05×' },
-  general:      { label: '通用音频',   color: 'text-slate-400',   bg: 'bg-slate-900/30 border-slate-600/30',   mult: '1.00×' },
-  // ★ v5 视频场景覆盖标签（vid_ 前缀映射到 image 场景分类器）
-  vid_cinematic: { label: '影视创作',  color: 'text-violet-400',  bg: 'bg-violet-900/20 border-violet-500/30', mult: '1.50×' },
-  vid_doc:       { label: '纪录/访谈', color: 'text-purple-400',  bg: 'bg-purple-900/20 border-purple-500/30', mult: '1.00×' },
-  vid_edu:       { label: '教学讲解',  color: 'text-indigo-400',  bg: 'bg-indigo-900/20 border-indigo-500/30', mult: '0.55×' },
-  vid_user_gen:  { label: '日常记录',  color: 'text-slate-400',   bg: 'bg-slate-900/30 border-slate-600/30',   mult: '0.25×' },
+  general:      { label: '通用',       color: 'text-slate-400',   bg: 'bg-slate-900/30 border-slate-600/30',   mult: '1.00×' },
+  // ── 视频场景 (★ v6: 与 VIDEO_SCENE_WEIGHTS / AMM_SCENE_CONFIG 对齐) ──
+  documentary:   { label: '📹 纪录/访谈', color: 'text-purple-400',  bg: 'bg-purple-900/20 border-purple-500/30', mult: '1.40×' },
+  lecture:       { label: '🎓 教学讲解',  color: 'text-indigo-400',  bg: 'bg-indigo-900/20 border-indigo-500/30', mult: '1.30×' },
+  cinematic:     { label: '🎬 影视创作',  color: 'text-violet-400',  bg: 'bg-violet-900/20 border-violet-500/30', mult: '1.20×' },
+  sports_action: { label: '⚽ 运动/动作', color: 'text-sky-400',     bg: 'bg-sky-900/20 border-sky-500/30',       mult: '0.90×' },
+  vlog:          { label: '📱 个人 vlog', color: 'text-slate-400',   bg: 'bg-slate-900/30 border-slate-600/30',   mult: '0.65×' },
+  // ── 旧版 vid_ 前缀兼容（v5 遗留，防止 undefined）──────────────────
+  vid_cinematic: { label: '🎬 影视创作',  color: 'text-violet-400',  bg: 'bg-violet-900/20 border-violet-500/30', mult: '1.20×' },
+  vid_doc:       { label: '📹 纪录/访谈', color: 'text-purple-400',  bg: 'bg-purple-900/20 border-purple-500/30', mult: '1.40×' },
+  vid_edu:       { label: '🎓 教学讲解',  color: 'text-indigo-400',  bg: 'bg-indigo-900/20 border-indigo-500/30', mult: '1.30×' },
+  vid_user_gen:  { label: '📱 日常记录',  color: 'text-slate-400',   bg: 'bg-slate-900/30 border-slate-600/30',   mult: '0.65×' },
 };
 
 // 音频细粒度场景标签（audio_scene 字段，仅音频模态）
@@ -206,8 +215,8 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
     `[Stage 1] 模态路由 → [${(ADAPTER_LABEL[assetCategory]?.label || 'Adapter').toUpperCase()}] 初始化，向量知识库接入...`,
     sceneOverride
       ? `[Stage 2] 场景覆盖已激活 → 跳过 SceneClassifier，强制场景: ${sceneOverride}`
-      : `[Stage 2] SceneClassifier v4 dual-channel → 识别 ${assetCategory === 'audio' ? '音频场景 (声学×0.65 + 文本KWS×0.35)' : '文本/图像场景子类型 (rule+ML hybrid)'}...`,
-    `[Stage 3] 场景自适应特征提取 → ${assetCategory === 'audio' ? 'MFCC嵌入 + PESQ代理SNR + 频谱熵' : assetCategory === 'image' ? 'pHash + LAION美学 + DWT' : 'Shannon熵 + GraphRAG + SimHash'}...`,
+      : `[Stage 2] SceneClassifier v4 dual-channel → 识别 ${assetCategory === 'audio' ? '音频场景 (声学×0.65 + 文本KWS×0.35)' : assetCategory === 'video' ? '视频场景 (CLIP视觉+关键词 hybrid)' : '文本/图像场景子类型 (rule+ML hybrid)'}...`,
+    `[Stage 3] 场景自适应特征提取 → ${assetCategory === 'audio' ? 'MFCC嵌入 + PESQ代理SNR + 频谱熵' : assetCategory === 'image' ? 'pHash + LAION美学 + DWT' : assetCategory === 'video' ? 'CLIP视觉流 + ffmpeg音轨→AudioAdapter 双流融合 (α=0.60/β=0.40)' : 'Shannon熵 + GraphRAG + SimHash'}...`,
     `[Stage 4] TEV 双层乘数 → 模态基础倍率 × 场景权重 → 复合评分...`,
     '[Stage 5] AMM 联合曲线 + KNN-Shapley + 实物期权 → 统一定价上链...',
   ];
@@ -217,7 +226,7 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
       text:  ['信息熵密度(抗废话)', '场景信噪比', '实体拓扑密度(GraphRAG)', '语料库稀缺度', '大模型微调增益', 'KNN-Shapley贡献度'],
       image: ['CLIP语义对齐度', '频域隐写鲁棒性(DWT)', 'LAION美学评级', '画派风格稀缺度', 'LoRA微调增益', 'KNN-Shapley贡献度'],
       audio: ['频谱熵(信息密度)', 'PESQ感知信噪比', '语音指令连贯性', '音频库稀缺度', 'ASR微调增益', 'KNN-Shapley贡献度'],
-      video: ['帧多样性(描述代理·A)', '视频码率质量(代理·A)', '镜头结构复杂度(代理·A)', '视频库稀缺度', '视频训练增益(代理·A)', 'KNN-Shapley贡献度'],
+      video: ['帧时域多样性 (CLIP+音频流)', 'CLIP美学/音频SNR (双流融合)', '镜头切换/时频结构 (双流)', '视频库稀缺度', '多帧+音轨训练增益', 'KNN-Shapley贡献度'],
     }[assetCategory] || [];
     setChartData(defaultNames.map(n => ({ subject: n, score: 0, fullMark: 100 })));
 
@@ -288,6 +297,20 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
   const methodBadge = METHOD_BADGE[sc?.method] ?? null;
   const audioScene  = AUDIO_SCENE_LABELS[sc?.audio_scene] ?? null;
   const adapterCls  = ADAPTER_LABEL[assetCategory] ?? ADAPTER_LABEL['text'];
+  // ★ v6: Stage C 双流推理诊断（视频模态）
+  const dualStream  = (assetCategory === 'video' && meta?.video_stage)
+    ? {
+        stage:     meta.video_stage,
+        hasAudio:  !!meta.has_audio_stream,
+        audioSnr:  meta.audio_snr,
+        audioEnt:  meta.audio_entropy,
+        audioScRaw: meta.audio_scene_raw,
+        fusionAlpha: meta.fusion_alpha,
+        nFrames:   meta.video_n_frames,
+        duration:  meta.video_duration_s,
+        whisper:   meta.whisper_text,
+      }
+    : null;
 
   // ★ v4: onNext 携带完整 valuationResult
   const handleNext = () => onNext(valuationResult);
@@ -303,7 +326,7 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
             <div className="flex items-center space-x-3">
               <Network className="w-7 h-7 text-purple-400" />
               <h1 className="text-xl font-extrabold tracking-wide text-transparent bg-clip-text bg-gradient-to-r from-purple-400 to-indigo-300">
-                多模态统一定价预言机 v4
+                多模态统一定价预言机 v6
               </h1>
               {sceneOverride && (
                 <span className="flex items-center gap-1 px-2 py-0.5 rounded border border-amber-500/40 bg-amber-900/20 text-amber-300 text-[10px] font-mono">
@@ -440,6 +463,24 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
                     </span>
                   </div>
                 )}
+                {/* ★ v6: Stage C 双流推理徽标（视频模态）*/}
+                {dualStream && (
+                  <div className="flex items-center gap-1">
+                    <span className="text-slate-600">|</span>
+                    <span className={`px-1.5 py-0.5 rounded border text-[9px] font-bold font-mono
+                      ${dualStream.hasAudio
+                        ? 'border-teal-500/40 bg-teal-900/20 text-teal-300'
+                        : 'border-violet-500/30 bg-violet-900/20 text-violet-400'}`}>
+                      Stage {dualStream.stage}
+                      {dualStream.hasAudio ? ' · 双流 ✓' : ' · 纯视觉'}
+                    </span>
+                    {dualStream.nFrames > 0 && (
+                      <span className="text-slate-500 text-[9px] font-mono">
+                        {dualStream.nFrames}帧{dualStream.duration > 0 ? ` · ${dualStream.duration}s` : ''}
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -450,7 +491,7 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
             {/* Execution log */}
             <div className="bg-[#0a0f18] rounded-2xl border border-slate-800 p-5" style={{ minHeight: 160 }}>
               <h3 className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-3 border-b border-slate-800/80 pb-2">
-                Oracle Execution Log v4
+                Oracle Execution Log v6
               </h3>
               <div className="space-y-2">
                 {EXEC_STEPS.map((step, i) => (
@@ -459,6 +500,44 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
                   </div>
                 ))}
               </div>
+              {/* ★ v6: Stage C 双流推理详情（视频模态，有结果时展示）*/}
+              {dualStream && !isCalculating && (
+                <div className="mt-3 pt-3 border-t border-slate-800 grid grid-cols-2 gap-x-4 gap-y-1 text-[10px] font-mono">
+                  <div className="text-slate-600 uppercase tracking-wider col-span-2 mb-0.5">
+                    🎬 VideoAdapter Stage {dualStream.stage} · 双流融合诊断
+                  </div>
+                  <div className="text-slate-500">视觉流</div>
+                  <div className={dualStream.nFrames > 0 ? 'text-emerald-400' : 'text-slate-600'}>
+                    {dualStream.nFrames > 0 ? `${dualStream.nFrames} 帧 · ${dualStream.duration}s` : '仅描述代理'}
+                  </div>
+                  <div className="text-slate-500">音频流</div>
+                  <div className={dualStream.hasAudio ? 'text-teal-400' : 'text-slate-600'}>
+                    {dualStream.hasAudio
+                      ? `SNR ${dualStream.audioSnr?.toFixed(1)} · 熵 ${dualStream.audioEnt?.toFixed(1)}`
+                      : '无音轨 / ffmpeg 未安装'}
+                  </div>
+                  {dualStream.hasAudio && (
+                    <>
+                      <div className="text-slate-500">融合权重</div>
+                      <div className="text-purple-400">
+                        视觉 α={dualStream.fusionAlpha ?? '0.60'} · 音频 β={dualStream.fusionAlpha ? (1 - dualStream.fusionAlpha).toFixed(2) : '0.40'}
+                      </div>
+                    </>
+                  )}
+                  {dualStream.audioScRaw && (
+                    <>
+                      <div className="text-slate-500">音频场景</div>
+                      <div className="text-cyan-400">{dualStream.audioScRaw}</div>
+                    </>
+                  )}
+                  {dualStream.whisper && (
+                    <>
+                      <div className="text-slate-500 col-span-2">Whisper 转录片段</div>
+                      <div className="text-slate-400 col-span-2 truncate italic">"{dualStream.whisper.slice(0, 80)}{dualStream.whisper.length > 80 ? '…' : ''}"</div>
+                    </>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Pricing result card */}

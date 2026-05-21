@@ -68,6 +68,15 @@ AMM_SCENE_CONFIG: dict = {
     "general":        {"demand":  5, "alpha": 25},  # 多模态音频基础集（兜底）
     # noise 不上市场，alpha=0 触发熔断
     "noise":          {"demand":  0, "alpha":  0},
+    # ── 视频场景 (★ v6 新增：Stage C 双流后视频各场景需单独定价) ──────
+    # VIDEO_SCENE_WEIGHTS × MODALITY_TEV=500x → 实际有效乘数如下:
+    #   documentary: 1.40 × 500 = 700x；lecture: 1.30 × 500 = 650x
+    # alpha 比同档音频略低（视频稀缺但需求方尚未充分教育）
+    "documentary":   {"demand": 24, "alpha": 36},  # 纪录片/采访/庭审，极高语义密度
+    "lecture":       {"demand": 20, "alpha": 30},  # 教学/演讲，TTS & 知识蒸馏
+    "cinematic":     {"demand": 18, "alpha": 26},  # 影视级制作，LoRA/T2V 训练
+    "sports_action": {"demand": 10, "alpha": 18},  # 运动/动作，时序建模
+    "vlog":          {"demand":  5, "alpha": 12},  # 个人 vlog，质量参差
 }
 
 # 向后兼容: 其他模块仍可 from scoring import DOMAIN_DEMAND

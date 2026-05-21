@@ -166,7 +166,7 @@ MODALITY_TEV: Dict[str, float] = {
     "text":  1.0,      # 纯文本语料基准
     "image": 50.0,     # 视觉特征 + pHash → 50x
     "audio": 120.0,    # MFCC + AFP 声学指纹 → 120x
-    "video": 350.0,    # CLIP 帧 + 时序多样性（双流 Stage C 后升至 500x）
+    "video": 500.0,    # CLIP 帧 + 时序多样性 + 音轨双流 (Stage C)，已升至 500x
 }
 
 BASE_UNIT = 2.0
@@ -378,11 +378,17 @@ async def valuate(asset: AssetData):
     # Shapley 置信度（若 features 中含私有键则取，否则默认 0.5）
     shapley_conf = float(features.get("_shapley_confidence", 0.5))
 
-    # ★ v5 修复: 音频模态优先用 audio_scene 的 AMM alpha（speech_medical=38）
-    # 而非 TEV 场景 sr.scene（medical_sft=32），两者不同
+    # v5: 音频模态用 audio_scene AMM alpha；v6: 视频模态用 VIDEO_SCENE_TO_TEV 推导的原始场景
+    # 视频 sr.scene 已经是通过 VIDEO_SCENE_TO_TEV 映射后的 tev_scene（如 legal_doc）
+    # 但 AMM 里现在直接有 documentary/lecture 等，优先用原始视频场景键
+    _video_raw_scene = (
+        features.get('_audio_scene')   # Stage C 音频流识别的视频场景（如 documentary）
+        if asset.asset_category == 'video'
+        else None
+    )
     effective_amm_scene = (
-        audio_scene
-        if (audio_scene and asset.asset_category == 'audio')
+        audio_scene        if (audio_scene    and asset.asset_category == 'audio')
+        else _video_raw_scene if (_video_raw_scene and asset.asset_category == 'video')
         else sr.scene
     )
     dyn_price, demand, amm_alpha = calculate_bonding_price(base_val, effective_amm_scene, shapley_conf)
@@ -445,8 +451,22 @@ async def valuate(asset: AssetData):
                 if "_clip_available" in features else {}
             ),
             **(
-                {"whisper_text": features["_whisper_text"], "whisper_bonus": features["_whisper_bonus"]}
+                {"whisper_text": features["_whisper_text"], "whisper_bonus": features.get("_whisper_bonus")}
                 if "_whisper_text" in features and features["_whisper_text"] else {}
+            ),
+            # ★ v6: Stage C 双流诊断字段透传（仅视频模态）
+            **(
+                {
+                    "has_audio_stream": features["_has_audio_stream"],
+                    "audio_snr":        features.get("_audio_snr"),
+                    "audio_entropy":    features.get("_audio_entropy"),
+                    "audio_scene_raw":  features.get("_audio_scene"),
+                    "fusion_alpha":     features.get("_fusion_alpha"),
+                    "video_n_frames":   features.get("_n_frames"),
+                    "video_duration_s": features.get("_duration_s"),
+                    "video_stage":      "C" if features.get("_has_audio_stream") else ("B" if features.get("_has_video") else "A"),
+                }
+                if asset.asset_category == "video" and "_has_audio_stream" in features else {}
             ),
         },
     }

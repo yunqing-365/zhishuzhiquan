@@ -28,6 +28,12 @@ const SCENE_AMM_CONFIG = {
   screenshot:   { alpha:  6, domainName: 'Screenshot (UI训练集)',        b2bCaller: 'UIGen-Model',         icon: '🖥️' },
   // 音频场景
   general:      { alpha: 25, domainName: 'Audio General (多模态基础集)', b2bCaller: 'Whisper-Finetuner',  icon: '🎙️' },
+  // ★ v6: 视频场景 (Stage C 双流后正式入 AMM，与 scoring.py AMM_SCENE_CONFIG 对齐)
+  documentary:   { alpha: 36, domainName: 'Documentary (纪录/庭审/访谈)', b2bCaller: 'VideoLLM-Trainer',   icon: '📹' },
+  lecture:       { alpha: 30, domainName: 'Lecture (教学/演讲/TTS对齐)', b2bCaller: 'EduVideoGen',         icon: '🎓' },
+  cinematic:     { alpha: 26, domainName: 'Cinematic (影视LoRA/T2V)',    b2bCaller: 'Wan2.1-LoRA',         icon: '🎬' },
+  sports_action: { alpha: 18, domainName: 'Sports (运动时序建模)',        b2bCaller: 'ActionCLIP-Corp',     icon: '⚽' },
+  vlog:          { alpha: 12, domainName: 'Vlog (个人内容多样性)',        b2bCaller: 'ContentFarm-AI',      icon: '📱' },
 };
 
 // 音频细粒度场景覆盖（★ v4 对齐 scene_classifier.py AUDIO_SCENE_WEIGHTS，补全6类）
@@ -63,7 +69,7 @@ const buildPaywallLog = (caller, modality, assetHash) => {
 //     前端不再 hardcode alpha，直接读取，保证前后端 AMM 曲线完全一致
 const resolveAmmConfig = (valuationResult, assetCategory) => {
   if (!valuationResult) {
-    const defaults = { text: 'medical_sft', image: 'illustration', audio: 'speech_medical', video: 'illustration' };
+    const defaults = { text: 'medical_sft', image: 'illustration', audio: 'speech_medical', video: 'documentary' };
     return SCENE_AMM_CONFIG[defaults[assetCategory]] || SCENE_AMM_CONFIG['general'];
   }
 
@@ -76,6 +82,11 @@ const resolveAmmConfig = (valuationResult, assetCategory) => {
     const baseConfig = (() => {
       if (assetCategory === 'audio' && sc?.audio_scene && AUDIO_SCENE_AMM[sc.audio_scene]) {
         return AUDIO_SCENE_AMM[sc.audio_scene];
+      }
+      // ★ v6: 视频模态优先用 meta.audio_scene_raw（Stage C 原始场景键，如 documentary）
+      if (assetCategory === 'video') {
+        const rawVideoScene = valuationResult?.meta?.audio_scene_raw;
+        if (rawVideoScene && SCENE_AMM_CONFIG[rawVideoScene]) return SCENE_AMM_CONFIG[rawVideoScene];
       }
       return SCENE_AMM_CONFIG[sc?.scene] || SCENE_AMM_CONFIG['general'];
     })();
