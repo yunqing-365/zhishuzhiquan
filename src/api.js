@@ -194,6 +194,21 @@ export const apiClient = {
   async scenes() {
     return apiFetch('/api/scenes', { method: 'GET' }, 3000);
   },
+
+  /**
+   * 批量估值（Stage 2 新增）
+   * @param {Array<object>} items  ValuationRequest 数组，最多 20 条
+   * 返回: { results, total, ok, errors }
+   */
+  async batchValuate(items) {
+    return withRetry(
+      () => apiFetch('/api/batch_valuate', {
+        method: 'POST',
+        body:   JSON.stringify({ items }),
+      }, 60_000),  // 批量最多 60s
+      0   // 批量不重试（避免重复计费）
+    );
+  },
 };
 
 // ── useApiHealth Hook —— 供顶栏展示后端状态 ──────────────────────
@@ -228,4 +243,67 @@ export function useApiHealth() {
   }, [check]);
 
   return { status, version, corpusSize, error, recheck: check };
+}
+
+// ── useWsValuate Hook — WebSocket 实时估值进度 ─────────────────────────
+// 用法:
+//   const { connect, progress, result, error, isConnecting } = useWsValuate()
+//   connect(payload)   // 触发估值，payload = { asset_category, description, ... }
+//   progress           // [{ stage, pct, msg }, ...]
+//   result             // 最终估值结果（同 /api/valuate 格式）
+//   error              // 错误信息
+
+export function useWsValuate() {
+  const [progress,     setProgress]     = useState([]);
+  const [result,       setResult]       = useState(null);
+  const [error,        setError]        = useState(null);
+  const [isConnecting, setIsConnecting] = useState(false);
+  const wsRef = useCallback(null, []);
+
+  const connect = useCallback((payload) => {
+    setProgress([]);
+    setResult(null);
+    setError(null);
+    setIsConnecting(true);
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    // 开发时 Vite devServer 代理 /ws/* → ws://localhost:8000/ws/*
+    const wsUrl = import.meta.env.PROD
+      ? `${protocol}//${window.location.host}/ws/valuate`
+      : `${protocol}//localhost:8000/ws/valuate`;
+
+    const ws = new WebSocket(wsUrl);
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify(payload));
+    };
+
+    ws.onmessage = (evt) => {
+      try {
+        const msg = JSON.parse(evt.data);
+        if (msg.type === 'progress') {
+          setProgress(prev => [...prev, { stage: msg.stage, pct: msg.pct, msg: msg.msg }]);
+        } else if (msg.type === 'result') {
+          setResult(msg.data);
+          setIsConnecting(false);
+        } else if (msg.type === 'error') {
+          setError(msg.detail || '未知错误');
+          setIsConnecting(false);
+        }
+      } catch (_) {}
+    };
+
+    ws.onerror = () => {
+      setError('WebSocket 连接失败，请检查后端服务');
+      setIsConnecting(false);
+    };
+
+    ws.onclose = () => {
+      setIsConnecting(false);
+    };
+
+    return () => ws.close();
+  }, []);
+
+  return { connect, progress, result, error, isConnecting };
 }

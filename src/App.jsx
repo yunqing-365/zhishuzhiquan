@@ -4,11 +4,12 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RainbowKitProvider, darkTheme }    from '@rainbow-me/rainbowkit';
 import '@rainbow-me/rainbowkit/styles.css';
 
-import { History }                from 'lucide-react';
+import { History, BarChart2 }     from 'lucide-react';
 import DataInputScreen            from './DataInputScreen';
 import OracleValuationScreen      from './OracleValuationScreen';
 import SmartSplitScreen           from './SmartSplitScreen';
 import HistoryPanel               from './HistoryPanel';
+import AnalyticsDashboard         from './AnalyticsDashboard';
 import WalletButton               from './web3/WalletButton';
 import { wagmiConfig, targetChain } from './web3/config';
 import { useApiHealth }           from './api';
@@ -42,7 +43,7 @@ const BackendStatus = () => {
   );
 };
 
-const ProgressBar = ({ step, category, onBack, canGoBack, onHistory }) => {
+const ProgressBar = ({ step, category, onBack, canGoBack, onHistory, onAnalytics }) => {
   const modeColor = {
     audio: 'bg-emerald-500',
     image: 'bg-amber-500',
@@ -103,6 +104,15 @@ const ProgressBar = ({ step, category, onBack, canGoBack, onHistory }) => {
         <span className="hidden sm:inline">历史</span>
       </button>
 
+      {/* ★ 看板 */}
+      <button
+        onClick={onAnalytics}
+        className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-700 text-slate-400 hover:text-slate-200 hover:border-purple-500/50 text-xs font-mono transition-all"
+      >
+        <BarChart2 className="w-3.5 h-3.5" />
+        <span className="hidden sm:inline">看板</span>
+      </button>
+
       {/* 模态标记 */}
       <div className={`shrink-0 text-[10px] font-mono px-2 py-1 rounded border ${
         category === 'audio' ? 'text-emerald-400 border-emerald-500/30 bg-emerald-900/20' :
@@ -136,6 +146,7 @@ function AppInner() {
   const [videoData, setVideoData]           = useState(null);
   const [valuationResult, setValuationResult] = useState(null);
   const [showHistory, setShowHistory]       = useState(false);
+  const [showAnalytics, setShowAnalytics]   = useState(false);
   const [stepHistory, setStepHistory]       = useState([]);
 
   const goTo = useCallback((nextStep) => {
@@ -190,6 +201,7 @@ function AppInner() {
           onBack={goBack}
           canGoBack={canGoBack}
           onHistory={() => setShowHistory(true)}
+          onAnalytics={() => setShowAnalytics(true)}
         />
       )}
 
@@ -223,6 +235,7 @@ function AppInner() {
       </div>
 
       <HistoryPanel isOpen={showHistory} onClose={() => setShowHistory(false)} />
+      <AnalyticsDashboard isOpen={showAnalytics} onClose={() => setShowAnalytics(false)} />
     </div>
   );
 }

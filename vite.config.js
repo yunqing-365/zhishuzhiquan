@@ -28,6 +28,12 @@ export default defineConfig(({ mode }) => {
             })
           },
         },
+        // ★ WebSocket 代理（Stage 2: 实时进度推送）
+        '/ws': {
+          target: backendUrl.replace('http', 'ws'),
+          ws: true,
+          changeOrigin: true,
+        },
       },
     },
 
