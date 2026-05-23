@@ -86,6 +86,7 @@ except ImportError as _zk_import_err:
 # ── 共享底层 ──────────────────────────────────────────────────────────
 # ── SQLite 历史持久化 ────────────────────────────────────────────────
 from storage import init_db, save_valuation, get_history, get_stats, get_valuation_by_id, CHROMA_PATH
+from collision_detector import detect_collision, detect_collision_from_text, CollisionReport
 
 print(">> 初始化数据库...")
 init_db()
@@ -300,11 +301,17 @@ class AssetData(BaseModel):
     scene_override: Optional[str] = None   # 强制指定场景（调试用）
 
 
-# ── 核心估值端点 ──────────────────────────────────────────────────────
-@app.post("/api/valuate")
-async def valuate(asset: AssetData):
+# ═══════════════════════════════════════════════════════════════════════
+# 核心估值逻辑（同步）— REST + WebSocket 共用，避免代码重复
+# ═══════════════════════════════════════════════════════════════════════
 
-    # ── 模态路由（注册表查询，无 if-else）────────────────────────────
+def _core_valuate(asset: AssetData) -> dict:
+    """
+    估值管道同步核心，供 /api/valuate（REST）和 /ws/valuate（WebSocket）共用。
+    返回与原 valuate() endpoint 完全相同结构的 dict。
+    在线程池中执行，不阻塞事件循环。
+    """
+    # ── 模态路由 ─────────────────────────────────────────────────────
     cfg = _registry.get(asset.asset_category)
     if cfg is None:
         return {
@@ -315,19 +322,18 @@ async def valuate(asset: AssetData):
     adapter = cfg.adapter
     extra   = cfg.extra_fn(asset)
 
-    # ── Stage 1: 向量化 ───────────────────────────────────────────────
+    # ── Stage 1: 向量化 ──────────────────────────────────────────────
     query_emb = adapter.get_embedding(asset.description, **extra)
 
-    # ── Stage 2: 场景分类 ─────────────────────────────────────────────
-    audio_scene = None   # 非音频模态保持 null
+    # ── Stage 2: 场景分类 ────────────────────────────────────────────
+    audio_scene = None
 
     if asset.scene_override:
-        # ★ v5: override 时如果是音频细粒度场景，回填 audio_scene（否则 AMM 找不到正确 alpha）
         _override_is_audio_scene = asset.scene_override in {
             "speech_medical", "speech_legal", "speech_edu",
             "music_original", "ambient_sfx", "noise",
         }
-        if _override_is_audio_scene and audio_scene is None:
+        if _override_is_audio_scene:
             audio_scene = asset.scene_override
         sr = SceneResult(
             scene             = asset.scene_override,
@@ -348,28 +354,27 @@ async def valuate(asset: AssetData):
             "reason":      "SceneClassifier 判定为噪声，拒绝上链",
             "asset_hash":  adapter.generate_hash(asset.description, **extra),
             "scene_classification": {
-                "scene":       "noise",
-                "confidence":  round(sr.confidence, 2),
+                "scene":        "noise",
+                "confidence":   round(sr.confidence, 2),
                 "quality_axis": sr.quality_axis,
-                "method":      getattr(sr, "method", "rule"),
-                "audio_scene": audio_scene,
+                "method":       getattr(sr, "method", "rule"),
+                "audio_scene":  audio_scene,
             },
         }
 
-    # ── Stage 3: 特征提取 ─────────────────────────────────────────────
-    # 真实向量距离：ChromaDB 余弦距离（替换原来的 random，稀缺度现在是真实指标）
-    asset_hash_val = adapter.generate_hash(asset.description, **extra)
+    # ── Stage 3: 特征提取 ────────────────────────────────────────────
+    asset_hash_val  = adapter.generate_hash(asset.description, **extra)
     vector_distance = _get_real_vector_distance(query_emb, asset_hash_val)
 
     features = adapter.extract_metrics(
         asset.description, sr, vector_distance, query_emb, **extra
     )
 
-    # ── Stage 4: TEV 复合评分 ─────────────────────────────────────────
+    # ── Stage 4: TEV 复合评分 ────────────────────────────────────────
     w         = sr.composite_weights
     composite = sum(features[k] * w[k] for k in w)
 
-    # ── Stage 5: 双层乘数定价 ─────────────────────────────────────────
+    # ── Stage 5: 双层乘数定价 ────────────────────────────────────────
     modality_w  = cfg.tev
     effective_w = modality_w * sr.weight_multiplier
     base_val    = composite * effective_w * BASE_UNIT
@@ -377,27 +382,22 @@ async def valuate(asset: AssetData):
     if composite < 35:
         base_val = 0.0
 
-    # Shapley 置信度（若 features 中含私有键则取，否则默认 0.5）
     shapley_conf = float(features.get("_shapley_confidence", 0.5))
 
-    # v5: 音频模态用 audio_scene AMM alpha；v6: 视频模态用 VIDEO_SCENE_TO_TEV 推导的原始场景
-    # 视频 sr.scene 已经是通过 VIDEO_SCENE_TO_TEV 映射后的 tev_scene（如 legal_doc）
-    # 但 AMM 里现在直接有 documentary/lecture 等，优先用原始视频场景键
     _video_raw_scene = (
-        features.get('_audio_scene')   # Stage C 音频流识别的视频场景（如 documentary）
-        if asset.asset_category == 'video'
+        features.get("_audio_scene")
+        if asset.asset_category == "video"
         else None
     )
     effective_amm_scene = (
-        audio_scene        if (audio_scene    and asset.asset_category == 'audio')
-        else _video_raw_scene if (_video_raw_scene and asset.asset_category == 'video')
+        audio_scene         if (audio_scene     and asset.asset_category == "audio")
+        else _video_raw_scene if (_video_raw_scene and asset.asset_category == "video")
         else sr.scene
     )
     dyn_price, demand, amm_alpha = calculate_bonding_price(base_val, effective_amm_scene, shapley_conf)
-    opts              = real_options_pricing(base_val, features["scarcity"], features["shapley"], shapley_conf)
-    creator_ratio     = round(72.0 + (features["shapley"] / 100) * 18.0, 1) if base_val > 0 else 0
+    opts          = real_options_pricing(base_val, features["scarcity"], features["shapley"], shapley_conf)
+    creator_ratio = round(72.0 + (features["shapley"] / 100) * 18.0, 1) if base_val > 0 else 0
 
-    # 6D 指标列表（供前端雷达图）
     metric_keys = ["entropy", "snr", "structure", "scarcity", "llm_value", "shapley"]
     metrics = [
         {"subject": name, "score": round(features[key], 1), "fullMark": 100}
@@ -407,19 +407,14 @@ async def valuate(asset: AssetData):
     _response = {
         "status":     "success" if base_val > 0 else "rejected",
         "asset_hash": asset_hash_val,
-
-        # ── 场景分类（含 method 和 audio_scene，v3 漏掉了）────────────
         "scene_classification": {
-            "scene":       sr.scene,
-            "confidence":  round(sr.confidence, 2),
+            "scene":        sr.scene,
+            "confidence":   round(sr.confidence, 2),
             "quality_axis": sr.quality_axis,
-            "method":      getattr(sr, "method", "rule"),   # rule/ml/hybrid/override
-            "audio_scene": audio_scene,                      # 音频细粒度标签
+            "method":       getattr(sr, "method", "rule"),
+            "audio_scene":  audio_scene,
         },
-
         "metrics": metrics,
-
-        # ── 完整定价结果 ──────────────────────────────────────────────
         "final_valuation": {
             "composite_quality": round(composite, 1),
             "modality_tev":      f"{modality_w}x",
@@ -430,20 +425,17 @@ async def valuate(asset: AssetData):
             "option_premium":    opts["option_value"],
             "sigma":             opts["sigma"],
             "market_demand":     demand,
-            "amm_alpha":         amm_alpha,   # ★ v4: 场景专属 AMM 斜率，前端直接使用
+            "amm_alpha":         amm_alpha,
             "creator_ratio":     creator_ratio,
         },
-
-        # ── 元信息（调试 + 前端展示）──────────────────────────────────
         "meta": {
-            "modality":         asset.asset_category,
-            "modality_label":   cfg.label,
-            "adapter_version":  cfg.adapter_version,
-            "scene_override":   asset.scene_override,
+            "modality":           asset.asset_category,
+            "modality_label":     cfg.label,
+            "adapter_version":    cfg.adapter_version,
+            "scene_override":     asset.scene_override,
             "shapley_confidence": round(shapley_conf, 3),
-            "vector_distance":  vector_distance,   # ★ v5: 真实稀缺度（非随机）
-            "corpus_size":      _collection.count(),
-            # ★ v3/v2 适配器私有字段透传（仅当存在时）
+            "vector_distance":    vector_distance,
+            "corpus_size":        _collection.count(),
             **(
                 {"semantic_snr": features["_semantic_snr"], "rule_snr": features["_rule_snr"]}
                 if "_semantic_snr" in features else {}
@@ -456,7 +448,6 @@ async def valuate(asset: AssetData):
                 {"whisper_text": features["_whisper_text"], "whisper_bonus": features.get("_whisper_bonus")}
                 if "_whisper_text" in features and features["_whisper_text"] else {}
             ),
-            # ★ v6: Stage C 双流诊断字段透传（仅视频模态）
             **(
                 {
                     "has_audio_stream": features["_has_audio_stream"],
@@ -473,7 +464,7 @@ async def valuate(asset: AssetData):
         },
     }
 
-    # ── Stage 6: ZK 承诺生成（is_zk_mode=True 且估值成功时）────────
+    # ── Stage 6: ZK 承诺 ────────────────────────────────────────────
     _response["zk_proof"] = None
     if asset.is_zk_mode and _ZK_AVAILABLE and _response["status"] == "success":
         try:
@@ -488,22 +479,31 @@ async def valuate(asset: AssetData):
         except Exception as _zk_err:
             print(f"!! [ZK] 承诺生成失败（降级跳过）: {_zk_err}")
 
-    # ── 估值后处理：存入 ChromaDB + SQLite（两者失败均不影响响应）────
+    # ── Stage 7: 持久化 ─────────────────────────────────────────────
     if _response["status"] == "success":
-        # 存入向量知识库（让 KNN-Shapley 越来越精确）
         _add_to_corpus(
-            asset_hash   = asset_hash_val,
-            embedding    = query_emb,
-            metadata     = {
-                "modality": asset.asset_category,
-                "scene":    sr.scene,
+            asset_hash = asset_hash_val,
+            embedding  = query_emb,
+            metadata   = {
+                "modality":    asset.asset_category,
+                "scene":       sr.scene,
                 "audio_scene": audio_scene or "",
             },
         )
-        # 存入 SQLite 历史记录
         save_valuation(_response, asset.description, vector_distance)
 
     return _response
+
+
+# ── 核心估值端点 ──────────────────────────────────────────────────────
+@app.post("/api/valuate")
+async def valuate(asset: AssetData):
+    """REST 估值端点 — 委托给 _core_valuate() 同步核心"""
+    loop = asyncio.get_event_loop()
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        result = await loop.run_in_executor(pool, _core_valuate, asset)
+    return result
 
 
 # ── 辅助端点 ─────────────────────────────────────────────────────────
@@ -634,58 +634,95 @@ async def top_assets(limit: int = 10, modality: str = ""):
 
 
 
-# ─── WebSocket 实时估值进度推送 (Stage 2 新增) ────────────────────────
-# 客户端连接后发送估值 payload，服务端边处理边推送进度事件。
-# 消息格式: {"type": "progress", "stage": str, "pct": int, "msg": str}
-#           {"type": "result",   "data": dict}
-#           {"type": "error",    "detail": str}
+# ═══════════════════════════════════════════════════════════════════════
+# WebSocket 实时估值进度推送  /ws/valuate
+# ═══════════════════════════════════════════════════════════════════════
+# 协议（JSON 文本帧）:
+#   客户端 → 服务端:  AssetData 的 JSON 字符串（一次性发送）
+#   服务端 → 客户端:
+#     {"type": "progress", "stage": str, "pct": int, "msg": str}  — 进度事件
+#     {"type": "result",   "data": dict}                           — 最终结果
+#     {"type": "error",    "detail": str}                          — 错误
+# ═══════════════════════════════════════════════════════════════════════
 
 @app.websocket("/ws/valuate")
 async def ws_valuate(websocket: WebSocket):
     await websocket.accept()
-    try:
-        raw = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
-        payload = json.loads(raw)
 
-        async def push(stage: str, pct: int, msg: str):
-            try:
-                await websocket.send_json({"type": "progress", "stage": stage, "pct": pct, "msg": msg})
-            except Exception:
-                pass  # 客户端已断开
-
-        await push("init",    5,  "初始化估值管道...")
-        await push("hash",   15,  "计算资产感知哈希...")
-        await asyncio.sleep(0.1)  # 让前端有时间渲染首帧
-
-        await push("scene",  35,  "多模态场景识别中...")
-        await asyncio.sleep(0.05)
-
-        await push("score",  60,  "Shapley 质量评分 + AMM 定价...")
-        await asyncio.sleep(0.05)
-
-        await push("zk",     80,  "生成 ZK Poseidon 承诺...")
-        await asyncio.sleep(0.05)
-
-        await push("save",   92,  "持久化至 SQLite + ChromaDB...")
-
-        # ── 调用与 /api/valuate 相同的内部处理函数 ──────────────────
-        # 构建 ValuationRequest 对象后复用 _run_valuation
-        from pydantic import ValidationError as PydanticValidationError
+    async def push(stage: str, pct: int, msg: str) -> None:
+        """向客户端推送进度帧，忽略已断开的连接。"""
         try:
-            req = ValuationRequest(**payload)
-        except PydanticValidationError as e:
-            await websocket.send_json({"type": "error", "detail": str(e)})
+            await websocket.send_json(
+                {"type": "progress", "stage": stage, "pct": pct, "msg": msg}
+            )
+        except Exception:
+            pass
+
+    try:
+        # ── 1. 接收客户端 payload（30s 超时）──────────────────────────
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as e:
+            await websocket.send_json({"type": "error", "detail": f"JSON 解析失败: {e}"})
             return
 
-        result = await _run_valuation_async(req)
+        # ── 2. 验证 payload 结构 ──────────────────────────────────────
+        from pydantic import ValidationError as _PydanticError
+        try:
+            asset = AssetData(**payload)
+        except _PydanticError as e:
+            await websocket.send_json({"type": "error", "detail": f"参数校验失败: {e}"})
+            return
 
+        # ── 3. 推送初始进度 ───────────────────────────────────────────
+        await push("init",  5,  "初始化估值管道...")
+        await asyncio.sleep(0.05)
+
+        # ── 4. 在线程池中执行估值，同时持续推送进度 ──────────────────
+        # 进度推送与实际计算并行：计算在 executor 里，进度在事件循环里
+        import concurrent.futures
+
+        loop       = asyncio.get_event_loop()
+        executor   = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future     = loop.run_in_executor(executor, _core_valuate, asset)
+
+        # 模拟各阶段进度（与 _core_valuate 内部 Stage 1-7 对应）
+        _progress_stages = [
+            ("embed",  20, "Stage 1 · 向量化资产内容..."),
+            ("scene",  40, "Stage 2 · 多模态场景分类..."),
+            ("feat",   58, "Stage 3 · 特征提取 + 稀缺度计算..."),
+            ("score",  72, "Stage 4-5 · Shapley 评分 + AMM 定价..."),
+            ("zk",     86, "Stage 6 · 生成 ZK Poseidon 承诺..."),
+            ("save",   94, "Stage 7 · 持久化至 ChromaDB + SQLite..."),
+        ]
+
+        # 每隔约 0.4s 推一帧进度，直到 future 完成
+        stage_idx = 0
+        while not future.done():
+            if stage_idx < len(_progress_stages):
+                s, pct, msg = _progress_stages[stage_idx]
+                await push(s, pct, msg)
+                stage_idx += 1
+            await asyncio.sleep(0.4)
+
+        # ── 5. 获取结果 ───────────────────────────────────────────────
+        try:
+            result = await future
+        except Exception as e:
+            await websocket.send_json({"type": "error", "detail": f"估值计算失败: {e}"})
+            return
+        finally:
+            executor.shutdown(wait=False)
+
+        # ── 6. 推送完成并发送结果 ─────────────────────────────────────
         await push("done", 100, "估值完成 ✓")
         await websocket.send_json({"type": "result", "data": result})
 
     except asyncio.TimeoutError:
         await websocket.send_json({"type": "error", "detail": "等待客户端数据超时 (30s)"})
     except WebSocketDisconnect:
-        pass  # 客户端主动断开，正常
+        pass   # 客户端主动断开，正常
     except Exception as e:
         try:
             await websocket.send_json({"type": "error", "detail": str(e)})
@@ -698,133 +735,36 @@ async def ws_valuate(websocket: WebSocket):
             pass
 
 
-async def _run_valuation_async(req: "ValuationRequest") -> dict:
-    """
-    将同步 valuate() 逻辑包装为 async（在线程池中执行，不阻塞事件循环）。
-    这样 WebSocket 的进度消息和 REST /api/valuate 共用同一套处理路径。
-    """
-    import concurrent.futures
-    loop = asyncio.get_event_loop()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        result = await loop.run_in_executor(pool, lambda: _sync_valuate(req))
-    return result
-
-
-def _sync_valuate(req: "ValuationRequest") -> dict:
-    """从 /api/valuate 中提取的同步处理核心，供 WebSocket 复用。"""
-    # ── 此函数在线程池中执行，可以调用所有同步 IO ────────────────────
-    # 委托给已有的 valuate() endpoint 内部逻辑（通过 asyncio.run_coroutine_threadsafe
-    # 会造成死锁，改为直接重建相同逻辑）
-    # 最简单且安全的做法：直接调用 valuate() handler 内部可提取的公共函数
-    # 此处简化为再次调用 /api/valuate 的内部函数 _handle_valuate()
-    return _handle_valuate_sync(req)
-
-
-def _handle_valuate_sync(req):
-    """
-    核心估值逻辑的同步版本，供 WebSocket + REST 共用。
-    TODO: 阶段3 重构 valuate() endpoint，提取此函数为公共模块。
-    当前实现：直接 import 并调用已存在的注册表路由管道。
-    """
-    # 直接调用 oracle 注册表（与 /api/valuate POST handler 完全一致）
-    # 由于 FastAPI endpoint 是 async def，这里重建等效同步调用
-    import hashlib, time
-    asset_category = req.asset_category
-    description    = req.description or ""
-    is_zk_mode     = req.is_zk_mode
-    scene_override = req.scene_override
-
-    cfg = _registry.get(asset_category)
-    if cfg is None:
-        raise ValueError(f"不支持的模态: {asset_category}")
-
-    # 从 payload 提取额外参数（与 valuate() endpoint 相同逻辑）
-    extra_kwargs = cfg.extra_kwargs(req) if cfg.extra_kwargs else {}
-    result_obj   = cfg.adapter.analyze(text=description, **extra_kwargs)
-
-    scene_result = (
-        cfg.scene_fn(description, **({} if not extra_kwargs else {}))
-        if not scene_override
-        else SceneResult(scene=scene_override, confidence=1.0, method="override", weights={})
-    )
-
-    final_val = result_obj.get("final_valuation", {})
-    asset_hash = result_obj.get("asset_hash", hashlib.sha256(description.encode()).hexdigest()[:16])
-
-    zk_proof = None
-    if is_zk_mode and _ZK_AVAILABLE:
-        try:
-            zk_proof = generate_zk_commitment(
-                asset_hash  = asset_hash,
-                base_value  = final_val.get("base_value", 0),
-                scene       = scene_result.scene,
-                modality    = asset_category,
-            ).to_dict()
-        except Exception as _zk_e:
-            print(f"!! [ZK sync] {_zk_e}")
-
-    from storage import save_valuation
-    save_valuation(
-        asset_hash        = asset_hash,
-        modality          = asset_category,
-        scene             = scene_result.scene,
-        audio_scene       = getattr(scene_result, "audio_scene", None),
-        composite_quality = final_val.get("composite_quality", 0),
-        dynamic_price     = final_val.get("dynamic_price",     0),
-        base_value        = final_val.get("base_value",        0),
-        option_premium    = final_val.get("option_premium",    0),
-        creator_ratio     = final_val.get("creator_ratio",     0),
-        vector_distance   = result_obj.get("vector_distance",  0),
-        description_preview = description[:120],
-        zk_commitment     = zk_proof.get("commitment") if zk_proof else None,
-    )
-
-    return {
-        **result_obj,
-        "scene_classification": {
-            "scene":      scene_result.scene,
-            "confidence": round(scene_result.confidence, 3),
-            "method":     scene_result.method,
-            "audio_scene": getattr(scene_result, "audio_scene", None),
-        },
-        "zk_proof": zk_proof,
-        "meta": {
-            "modality_label":   cfg.adapter.__class__.__name__,
-            "adapter_version":  getattr(cfg.adapter, "VERSION", "unknown"),
-            "is_zk_mode":       is_zk_mode,
-            "ws_processed":     True,
-        }
-    }
-
-
-# ─── 批量估值 API (Stage 2 新增) ──────────────────────────────────────
-# 接受最多 20 条资产，顺序处理，返回结果列表。
-# 每条结果包含 status ("ok"|"error") + 估值数据或错误信息。
-# 用途：B2B 批量资产注册、数据集批量定价。
+# ═══════════════════════════════════════════════════════════════════════
+# 批量估值 API  POST /api/batch_valuate
+# ═══════════════════════════════════════════════════════════════════════
+# 接受最多 20 条资产，在线程池中顺序处理，返回结果列表。
+# 每条结果: {"index": int, "status": "ok"|"error", "data"/{} | "detail": str}
 
 class BatchValuationRequest(BaseModel):
-    items: list[ValuationRequest]
+    items: list[AssetData]   # 复用已有的 AssetData，无需新建类型
+
 
 @app.post("/api/batch_valuate")
 async def batch_valuate(batch: BatchValuationRequest):
     """
     批量多模态估值（最多 20 条/次）。
 
-    请求体:
-      { "items": [ <ValuationRequest>, ... ] }
-
-    响应:
-      { "results": [ { "index": 0, "status": "ok", "data": {...} }, ... ],
-        "total": N, "ok": N, "errors": N }
+    请求体:  { "items": [ <AssetData>, ... ] }
+    响应:    { "results": [...], "total": N, "ok": N, "errors": N, "truncated": bool }
     """
     MAX_BATCH = 20
-    items = batch.items[:MAX_BATCH]
+    items   = batch.items[:MAX_BATCH]
     results = []
 
-    for i, req in enumerate(items):
+    loop = asyncio.get_event_loop()
+    import concurrent.futures
+
+    for i, asset in enumerate(items):
         try:
-            result = await _run_valuation_async(req)
-            results.append({"index": i, "status": "ok", "data": result})
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                data = await loop.run_in_executor(pool, _core_valuate, asset)
+            results.append({"index": i, "status": "ok", "data": data})
         except Exception as e:
             results.append({"index": i, "status": "error", "detail": str(e)})
 
@@ -832,12 +772,100 @@ async def batch_valuate(batch: BatchValuationRequest):
     err_count = len(results) - ok_count
 
     return {
-        "results": results,
-        "total":   len(results),
-        "ok":      ok_count,
-        "errors":  err_count,
+        "results":   results,
+        "total":     len(results),
+        "ok":        ok_count,
+        "errors":    err_count,
         "truncated": len(batch.items) > MAX_BATCH,
     }
+
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 相似资产碰撞检测  POST /api/detect_collision
+# ═══════════════════════════════════════════════════════════════════════
+# 两种调用方式：
+#   1. 仅描述文本（quick mode）：  { "description": "...", "asset_category": "text" }
+#   2. 已有 embedding（fast mode）：{ "embedding": [...], "exclude_hash": "abc123" }
+# 优先使用 embedding（跳过向量化步骤，更快）；若不提供则用 description 现算。
+
+class CollisionRequest(BaseModel):
+    description:    str            = ""       # 原始文本描述（quick mode）
+    asset_category: str            = "text"   # 模态，用于 quick mode 的 embedding
+    embedding:      list[float]    = []       # 预计算向量（fast mode，可选）
+    exclude_hash:   str            = ""       # 排除自身哈希（估值后立即检测时用）
+    top_k:          int            = 8        # 返回候选数量，最多 20
+
+
+@app.post("/api/detect_collision")
+async def detect_collision_endpoint(req: CollisionRequest):
+    """
+    相似资产 ANN 碰撞检测。
+
+    返回结构:
+    {
+      "verdict":         "COLLISION" | "WARNING" | "SAFE" | "EMPTY_CORPUS",
+      "risk_score":      0.92,         // 最高相似度 [0,1]
+      "collision_count": 1,
+      "warning_count":   2,
+      "total_checked":   142,
+      "message":         "检测到 1 个高度相似资产…",
+      "latency_ms":      18.3,
+      "top_matches": [
+        {
+          "asset_hash":       "a1b2c3…",
+          "distance":         0.08,
+          "similarity_score": 0.96,
+          "risk_level":       "COLLISION",
+          "modality":         "text",
+          "scene":            "legal_doc",
+          "audio_scene":      null
+        }, ...
+      ]
+    }
+    """
+    import concurrent.futures
+
+    top_k        = max(1, min(20, req.top_k))
+    exclude_hash = req.exclude_hash or None
+
+    def _run() -> dict:
+        if req.embedding:
+            # Fast mode：直接用传入的 embedding
+            report = detect_collision(
+                query_embedding = req.embedding,
+                collection      = _collection,
+                exclude_hash    = exclude_hash,
+                top_k           = top_k,
+            )
+        else:
+            # Quick mode：先用 embed_fn 向量化 description
+            if not req.description.strip():
+                return {
+                    "verdict":         "SAFE",
+                    "risk_score":      0.0,
+                    "collision_count": 0,
+                    "warning_count":   0,
+                    "total_checked":   0,
+                    "message":         "description 为空，跳过检测",
+                    "latency_ms":      0.0,
+                    "top_matches":     [],
+                }
+            report = detect_collision_from_text(
+                description  = req.description,
+                embed_fn     = _embed_fn,
+                collection   = _collection,
+                exclude_hash = exclude_hash,
+                top_k        = top_k,
+            )
+        return report.to_dict()
+
+    loop = asyncio.get_event_loop()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        result = await loop.run_in_executor(pool, _run)
+
+    return result
 
 
 if __name__ == "__main__":
@@ -847,3 +875,4 @@ if __name__ == "__main__":
     print(f">> 启动服务: http://{_host}:{_port}")
     print(f">> 允许跨域来源: {_allowed_origins}")
     uvicorn.run(app, host=_host, port=_port)
+

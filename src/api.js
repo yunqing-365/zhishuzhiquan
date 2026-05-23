@@ -213,7 +213,7 @@ export const apiClient = {
 
 // ── useApiHealth Hook —— 供顶栏展示后端状态 ──────────────────────
 // 使用方式: const { status, corpusSize } = useApiHealth()
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 
 export function useApiHealth() {
   const [status, setStatus]         = useState('checking'); // 'checking'|'online'|'offline'
@@ -253,26 +253,49 @@ export function useApiHealth() {
 //   result             // 最终估值结果（同 /api/valuate 格式）
 //   error              // 错误信息
 
+// ── useWsValuate Hook — WebSocket 实时估值进度 ─────────────────────────
+
 export function useWsValuate() {
   const [progress,     setProgress]     = useState([]);
   const [result,       setResult]       = useState(null);
   const [error,        setError]        = useState(null);
   const [isConnecting, setIsConnecting] = useState(false);
-  const wsRef = useCallback(null, []);
+  const wsRef = useRef(null);  // 存放 WebSocket 实例，供 disconnect() 使用
 
+  /** 主动断开当前 WebSocket 连接 */
+  const disconnect = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    setIsConnecting(false);
+  }, []);
+
+  /**
+   * 发起 WebSocket 估值
+   * @param {object} payload  与 /api/valuate 相同的请求体
+   */
   const connect = useCallback((payload) => {
+    // 断开上一次未结束的连接
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+
     setProgress([]);
     setResult(null);
     setError(null);
     setIsConnecting(true);
 
+    // 开发时走 Vite proxy（vite.config.js 中配置 /ws → localhost:8000）
+    // 生产时走同源 wss://
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    // 开发时 Vite devServer 代理 /ws/* → ws://localhost:8000/ws/*
     const wsUrl = import.meta.env.PROD
       ? `${protocol}//${window.location.host}/ws/valuate`
       : `${protocol}//localhost:8000/ws/valuate`;
 
     const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
 
     ws.onopen = () => {
       ws.send(JSON.stringify(payload));
@@ -286,24 +309,47 @@ export function useWsValuate() {
         } else if (msg.type === 'result') {
           setResult(msg.data);
           setIsConnecting(false);
+          wsRef.current = null;
         } else if (msg.type === 'error') {
           setError(msg.detail || '未知错误');
           setIsConnecting(false);
+          wsRef.current = null;
         }
-      } catch (_) {}
+      } catch (_) { /* 忽略格式错误的帧 */ }
     };
 
     ws.onerror = () => {
-      setError('WebSocket 连接失败，请检查后端服务');
+      setError('WebSocket 连接失败，后端可能未启动或不支持 WebSocket');
       setIsConnecting(false);
+      wsRef.current = null;
     };
 
     ws.onclose = () => {
       setIsConnecting(false);
+      wsRef.current = null;
     };
-
-    return () => ws.close();
   }, []);
 
-  return { connect, progress, result, error, isConnecting };
+  // 组件卸载时自动清理连接
+  useEffect(() => {
+    return () => {
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, []);
+
+  /** 当前进度百分比（取最新一帧的 pct，默认 0） */
+  const currentPct = progress.length > 0 ? progress[progress.length - 1].pct : 0;
+
+  /** 当前阶段描述（取最新一帧的 msg） */
+  const currentMsg = progress.length > 0 ? progress[progress.length - 1].msg : '';
+
+  return { connect, disconnect, progress, currentPct, currentMsg, result, error, isConnecting };
+}
+
+// ── detectCollision — 相似资产碰撞检测 ──────────────────────────────
+// 调用 POST /api/detect_collision
+// params: { description, asset_category, embedding?, exclude_hash?, top_k? }
+export async function detectCollision(params) {
+  const res = await apiClient.post('/api/detect_collision', params);
+  return res.data;
 }

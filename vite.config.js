@@ -29,8 +29,9 @@ export default defineConfig(({ mode }) => {
           },
         },
         // ★ WebSocket 代理（Stage 2: 实时进度推送）
+        // replace http(s):// → ws(s):// 正确处理两种协议
         '/ws': {
-          target: backendUrl.replace('http', 'ws'),
+          target: backendUrl.replace(/^http/, 'ws'),
           ws: true,
           changeOrigin: true,
         },

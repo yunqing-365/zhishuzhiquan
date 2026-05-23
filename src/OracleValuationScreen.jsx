@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { apiClient, ApiError, useWsValuate } from './api';
 import { Radar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, ResponsiveContainer, Tooltip } from 'recharts';
-import { Activity, ShieldCheck, FileText, Network, CheckCircle2, ArrowRight, Tag, Layers, FlaskConical, Mic, Lock, Eye, KeyRound } from 'lucide-react';
+import { Activity, ShieldCheck, FileText, Network, CheckCircle2, ArrowRight, Tag, Layers, FlaskConical, Mic, Lock, Eye, KeyRound, Shield } from 'lucide-react';
+import CollisionPanel from './CollisionPanel';
 
 // 场景标签配置（与后端 scene_classifier.py + audio_adapter.py + VIDEO_SCENE_WEIGHTS 完整同步）
 const SCENE_LABELS = {
@@ -210,10 +211,12 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
   // ★ v5: 数据来源状态 — 'api' | 'mock' | 'error'
   const [dataSource, setDataSource]           = useState(null);
   const [apiError, setApiError]               = useState(null);
+  const [showCollision, setShowCollision]     = useState(false);
 
   // ★ Stage 2: WebSocket 实时进度推送
-  const { connect: wsConnect, progress: wsProgress, result: wsResult } = useWsValuate();
-  const WS_STAGE_STEP = { init: 0, hash: 0, scene: 1, score: 3, zk: 4, save: 4, done: 4 };
+  const { connect: wsConnect, progress: wsProgress, result: wsResult,
+          currentPct: wsPct, currentMsg: wsMsg, disconnect: wsDisconnect } = useWsValuate();
+  const WS_STAGE_STEP = { init: 0, embed: 0, scene: 1, feat: 2, score: 3, zk: 4, save: 4, done: 4 };
 
   const EXEC_STEPS = [
     `[Stage 1] 模态路由 → [${(ADAPTER_LABEL[assetCategory]?.label || 'Adapter').toUpperCase()}] 初始化，向量知识库接入...`,
@@ -304,15 +307,6 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
       degraded = true;
       if (typeof wsCleanup === 'function') wsCleanup();
     };
-  }, []);          setValuationResult(mock);
-          setChartData(mock.metrics);
-          setIsCalculating(false);
-        }, 4200);
-      }
-    };
-
-    fetchValuation();
-    return () => clearInterval(ticker);
   }, []);
 
   const sc          = valuationResult?.scene_classification;
@@ -514,6 +508,37 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
           {/* Right: Log + Pricing */}
           <div className="flex flex-col gap-5">
 
+            {/* WebSocket 实时进度条（估值进行中时显示） */}
+            {isCalculating && (
+              <div className="bg-[#0a0f18] rounded-2xl border border-slate-800 p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
+                    WebSocket · 实时估值进度
+                  </span>
+                  <span className="text-[10px] font-mono text-purple-400">{wsPct}%</span>
+                </div>
+                {/* 进度条轨道 */}
+                <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden mb-2">
+                  <div
+                    className="h-full bg-gradient-to-r from-purple-500 to-indigo-400 rounded-full transition-all duration-500"
+                    style={{ width: `${wsPct}%` }}
+                  />
+                </div>
+                {/* 当前阶段描述 */}
+                {wsMsg && (
+                  <div className="text-[11px] font-mono text-slate-400 animate-pulse truncate">
+                    {wsMsg}
+                  </div>
+                )}
+                {/* 无 WS 进度时显示降级提示 */}
+                {!wsMsg && wsPct === 0 && (
+                  <div className="text-[11px] font-mono text-slate-600">
+                    连接中... 若 5s 无响应将自动降级到 REST 模式
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Execution log */}
             <div className="bg-[#0a0f18] rounded-2xl border border-slate-800 p-5" style={{ minHeight: 160 }}>
               <h3 className="text-[10px] font-bold text-slate-600 uppercase tracking-widest mb-3 border-b border-slate-800/80 pb-2">
@@ -667,13 +692,36 @@ const OracleValuationScreen = ({ assetData, assetCategory, isZkMode, sceneOverri
                 </div>
               )}
 
-              <button
-                onClick={handleNext}
-                disabled={valuationResult?.status === 'rejected'}
-                className={`w-full py-3.5 border rounded-xl font-bold transition-all flex items-center justify-center relative z-10 text-sm ${valuationResult?.status === 'rejected' ? 'bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed' : 'bg-purple-500/10 hover:bg-purple-500/20 border-purple-500/50 text-purple-300 shadow-[0_0_15px_rgba(139,92,246,0.1)] hover:shadow-[0_0_25px_rgba(139,92,246,0.25)]'}`}
-              >
-                下发至智能合约 AMM 交易大盘 <ArrowRight className="w-4 h-4 ml-2" />
-              </button>
+              {/* 碰撞检测 + 上链按钮组 */}
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowCollision(true)}
+                  disabled={!valuationResult}
+                  className="flex-1 py-3 border border-slate-700 hover:border-purple-500/50 rounded-xl font-mono text-xs text-slate-400 hover:text-purple-300 transition-all flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  <Shield className="w-3.5 h-3.5" />
+                  碰撞检测
+                </button>
+
+                <button
+                  onClick={handleNext}
+                  disabled={valuationResult?.status === 'rejected'}
+                  className={`flex-[2] py-3.5 border rounded-xl font-bold transition-all flex items-center justify-center relative z-10 text-sm ${valuationResult?.status === 'rejected' ? 'bg-slate-800 text-slate-500 border-slate-700 cursor-not-allowed' : 'bg-purple-500/10 hover:bg-purple-500/20 border-purple-500/50 text-purple-300 shadow-[0_0_15px_rgba(139,92,246,0.1)] hover:shadow-[0_0_25px_rgba(139,92,246,0.25)]'}`}
+                >
+                  下发至智能合约 AMM 交易大盘 <ArrowRight className="w-4 h-4 ml-2" />
+                </button>
+              </div>
+
+              {/* CollisionPanel 弹窗 */}
+              <CollisionPanel
+                isOpen={showCollision}
+                onClose={() => setShowCollision(false)}
+                prefill={{
+                  description:    assetData || '',
+                  asset_category: assetCategory || 'text',
+                }}
+                excludeHash={valuationResult?.asset_hash || ''}
+              />
             </div>
           </div>
         </div>

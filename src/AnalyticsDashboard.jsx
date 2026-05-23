@@ -4,10 +4,10 @@
  * 接入 /api/stats + /api/history + /api/top 三个端点
  * 展示：总览卡片 · 价格走势 · 场景分布 · 模态占比 · 高价值排行
  */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid,
-  Tooltip, ResponsiveContainer, Cell,
+  AreaChart, Area, BarChart, Bar, PieChart, Pie, XAxis, YAxis, CartesianGrid,
+  Tooltip, ResponsiveContainer, Cell, Legend,
 } from 'recharts';
 import {
   X, TrendingUp, Database, Zap, Activity,
@@ -50,7 +50,43 @@ const DarkTooltip = ({ active, payload, label }) => {
   );
 };
 
-// ── 单个指标卡片 ────────────────────────────────────────────────────
+// ── 自定义饼图标签 ────────────────────────────────────────────────────
+const PieLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent, name }) => {
+  if (percent < 0.06) return null;
+  const RADIAN = Math.PI / 180;
+  const r = innerRadius + (outerRadius - innerRadius) * 0.55;
+  const x = cx + r * Math.cos(-midAngle * RADIAN);
+  const y = cy + r * Math.sin(-midAngle * RADIAN);
+  return (
+    <text x={x} y={y} fill="white" textAnchor="middle" dominantBaseline="central"
+      style={{ fontSize: 9, fontFamily: 'monospace', fontWeight: 700 }}>
+      {`${(percent * 100).toFixed(0)}%`}
+    </text>
+  );
+};
+
+// ── 价格分布直方图数据构建 ────────────────────────────────────────────
+function buildPriceHistogram(records, buckets = 10) {
+  const prices = records.map(r => r.dynamic_price || 0).filter(p => p > 0);
+  if (prices.length < 2) return [];
+  const min = Math.min(...prices);
+  const max = Math.max(...prices);
+  if (max === min) return [{ range: `$${Math.round(min)}`, count: prices.length }];
+  const step = (max - min) / buckets;
+  const bins = Array.from({ length: buckets }, (_, i) => ({
+    range: `$${Math.round(min + i * step / 1000)}k`,
+    lo: min + i * step,
+    hi: min + (i + 1) * step,
+    count: 0,
+  }));
+  prices.forEach(p => {
+    const idx = Math.min(Math.floor((p - min) / step), buckets - 1);
+    bins[idx].count++;
+  });
+  return bins.filter(b => b.count > 0);
+}
+
+
 const StatCard = ({ label, value, sub, color }) => (
   <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
     <div className="text-[10px] font-mono text-slate-500 mb-1 uppercase tracking-wider">{label}</div>
@@ -61,11 +97,13 @@ const StatCard = ({ label, value, sub, color }) => (
 
 // ── 主组件 ──────────────────────────────────────────────────────────
 export default function AnalyticsDashboard({ isOpen, onClose }) {
-  const [stats,   setStats]   = useState(null);
-  const [history, setHistory] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error,   setError]   = useState(null);
-  const [tab,     setTab]     = useState('overview');
+  const [stats,       setStats]       = useState(null);
+  const [history,     setHistory]     = useState([]);
+  const [loading,     setLoading]     = useState(true);
+  const [error,       setError]       = useState(null);
+  const [tab,         setTab]         = useState('overview');
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const timerRef = useRef(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -91,6 +129,16 @@ export default function AnalyticsDashboard({ isOpen, onClose }) {
       fetchData();
     }
   }, [isOpen, fetchData]);
+
+  // 自动刷新（30s 间隔）
+  useEffect(() => {
+    if (autoRefresh && isOpen) {
+      timerRef.current = setInterval(fetchData, 30_000);
+    } else {
+      clearInterval(timerRef.current);
+    }
+    return () => clearInterval(timerRef.current);
+  }, [autoRefresh, isOpen, fetchData]);
 
   if (!isOpen) return null;
 
@@ -128,6 +176,9 @@ export default function AnalyticsDashboard({ isOpen, onClose }) {
     avg_price: s.avg_price || 0,
   }));
 
+  // 价格分布直方图
+  const priceHistogram = buildPriceHistogram(history);
+
   // ── 标签页定义 ────────────────────────────────────────────────────
   const TABS = [
     { id: 'overview', label: '总览',  icon: Activity   },
@@ -156,6 +207,19 @@ export default function AnalyticsDashboard({ isOpen, onClose }) {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {/* 自动刷新开关 */}
+          <button
+            onClick={() => setAutoRefresh(v => !v)}
+            title={autoRefresh ? '关闭自动刷新' : '开启自动刷新 (30s)'}
+            className={`flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-mono transition-all border ${
+              autoRefresh
+                ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30'
+                : 'text-slate-600 border-slate-700 hover:text-slate-400'
+            }`}
+          >
+            <span className={`w-1.5 h-1.5 rounded-full ${autoRefresh ? 'bg-emerald-400 animate-pulse' : 'bg-slate-600'}`} />
+            {autoRefresh ? '30s' : '自动'}
+          </button>
           <button
             onClick={fetchData}
             disabled={loading}
@@ -266,6 +330,45 @@ export default function AnalyticsDashboard({ isOpen, onClose }) {
                     </div>
                   )}
                 </div>
+
+                {/* Modality pie chart */}
+                {modalityList.length > 0 && (
+                  <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+                    <div className="text-xs font-mono text-slate-400 mb-4 flex items-center gap-2">
+                      <Activity className="w-3 h-3 text-purple-400" />
+                      模态估值占比
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <ResponsiveContainer width="50%" height={180}>
+                        <PieChart>
+                          <Pie
+                            data={modalityList}
+                            cx="50%" cy="50%"
+                            innerRadius={45} outerRadius={80}
+                            dataKey="count"
+                            labelLine={false}
+                            label={<PieLabel />}
+                          >
+                            {modalityList.map(({ key, hex }) => (
+                              <Cell key={key} fill={hex} stroke="transparent" />
+                            ))}
+                          </Pie>
+                          <Tooltip content={<DarkTooltip />} formatter={(v, n) => [v, n]} />
+                        </PieChart>
+                      </ResponsiveContainer>
+                      <div className="flex-1 space-y-2">
+                        {modalityList.sort((a, b) => b.count - a.count).map(({ key, label, hex, icon: Icon, count }) => (
+                          <div key={key} className="flex items-center gap-2">
+                            <Icon className="w-3 h-3 shrink-0" style={{ color: hex }} />
+                            <span className="text-[11px] font-mono text-slate-400 w-10 shrink-0">{label}</span>
+                            <span className="text-[11px] font-mono font-bold" style={{ color: hex }}>{count}</span>
+                            <span className="text-[10px] font-mono text-slate-600">次</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
 
                 {/* Mini price preview */}
                 {trendData.length >= 4 && (
@@ -420,10 +523,32 @@ export default function AnalyticsDashboard({ isOpen, onClose }) {
                     </ResponsiveContainer>
                   )}
                 </div>
+                {/* Price distribution histogram */}
+                <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+                  <div className="text-xs font-mono text-slate-400 mb-4 flex items-center gap-2">
+                    <TrendingUp className="w-3 h-3 text-purple-400" />
+                    价格分布 — 历史估值
+                  </div>
+                  {priceHistogram.length < 2 ? (
+                    <div className="text-xs text-slate-600 py-8 text-center">需要更多估值记录以生成分布图</div>
+                  ) : (
+                    <ResponsiveContainer width="100%" height={180}>
+                      <BarChart data={priceHistogram} margin={{ top: 4, right: 8, bottom: 0, left: -8 }}>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" vertical={false} />
+                        <XAxis dataKey="range" tick={{ fill: '#475569', fontSize: 9, fontFamily: 'monospace' }} tickLine={false} axisLine={false} />
+                        <YAxis tick={{ fill: '#475569', fontSize: 9 }} tickLine={false} axisLine={false} />
+                        <Tooltip content={<DarkTooltip />} />
+                        <Bar dataKey="count" name="资产数" radius={[3, 3, 0, 0]} maxBarSize={32}>
+                          {priceHistogram.map((_, i) => (
+                            <Cell key={i} fill={`hsl(${270 + i * 8}, 65%, ${52 + i * 2}%)`} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )}
+                </div>
               </div>
             )}
-
-            {/* ════ 排行 ════ */}
             {tab === 'top' && (
               <div className="space-y-2">
                 {topAssets.length === 0 ? (
