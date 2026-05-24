@@ -1,0 +1,74 @@
+# AI-Echo 后端依赖
+# 安装命令：pip install -r requirements.txt
+#
+# 注意：librosa 依赖 llvmlite，安装较慢，请耐心等待
+# 如果只需要文本/图像模态，可以注释掉 librosa 和 soundfile
+
+# ── Web 框架 ──────────────────────────────────────────────
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+python-multipart==0.0.18     # 支持文件上传（图像/音频）
+
+# ── 向量数据库 ──────────────────────────────────────────────
+chromadb==0.5.23
+
+# ── 嵌入模型 ────────────────────────────────────────────────
+sentence-transformers==3.3.1
+# 注：会自动安装 torch（CPU 版本），如需 GPU 版本请手动安装
+
+# ── 数值计算 ────────────────────────────────────────────────
+numpy==1.26.4
+scipy==1.14.1
+
+# ── 文本处理 ────────────────────────────────────────────────
+jieba==0.42.1                # 中文分词
+simhash==2.1.2               # SimHash 文本去重指纹
+
+# ── 图像处理 ────────────────────────────────────────────────
+Pillow==11.0.0               # ImageAdapter 使用
+
+# ── 音频处理（可选，音频模态需要）────────────────────────────
+librosa==0.10.2.post1        # MFCC 特征提取、频谱分析
+soundfile==0.12.1            # 音频文件读写（WAV/FLAC/MP3）
+
+# ── 开发工具（生产环境可不装）────────────────────────────────
+httpx==0.27.2                # 测试 API 用
+python-dotenv==1.0.1         # 读取 .env 文件
+
+# ── 阶段 2：真实 AI 推理模型（按需安装）────────────────────────
+# ImageAdapter v3: CLIP 图像语义编码
+# pip install transformers torch torchvision  （CPU 约 2GB）
+# GPU 版: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# transformers>=4.40.0
+
+# AudioAdapter v2: Whisper 语音转录
+# pip install openai-whisper  （base 模型约 150MB）
+# 或更快的实现: pip install faster-whisper
+# openai-whisper>=20231117
+
+# 注意：以上两项不写入固定版本，避免 CPU/GPU 环境冲突。
+# 需要时手动安装，系统会自动检测并启用，未安装则静默降级。
+
+# VideoAdapter v1: OpenCV 帧采样（Stage B 核心依赖）
+# pip install opencv-python-headless  （无 GUI，服务器推荐）
+# 或桌面环境: pip install opencv-python
+# opencv-python-headless>=4.8.0
+
+# VideoAdapter v2: Stage C 双流推理 — 音频流提取（系统级依赖）
+# 安装 ffmpeg（Stage C 音轨提取，无需 Python 包）:
+#   Ubuntu/Debian: sudo apt-get install -y ffmpeg
+#   macOS:         brew install ffmpeg
+#   Windows:       choco install ffmpeg  或手动加入 PATH
+# 未安装 ffmpeg 时 VideoAdapter 自动降级到 Stage B（纯视觉流），不影响其他模态
+
+# 图像感知哈希（ImageAdapter + VideoAdapter）
+# pip install ImageHash
+# ImageHash>=4.3.1
+
+# ── 数据集生产系统额外依赖 ────────────────────────────────────────
+openai>=1.30.0               # 自动标注 LLM 调用（annotator.py）
+aiofiles>=23.2.1             # 异步文件写入（packager.py）
+python-dotenv==1.0.1         # .env 配置读取（config.py）
+datasketch>=1.6.5            # MinHash LSH 去重（deduplicator.py）
+pyarrow>=16.0.0              # Parquet 格式打包导出（packager.py）

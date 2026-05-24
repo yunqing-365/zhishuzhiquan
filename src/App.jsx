@@ -6,6 +6,7 @@ import '@rainbow-me/rainbowkit/styles.css';
 
 import { History, BarChart2 }     from 'lucide-react';
 import DataInputScreen            from './DataInputScreen';
+import DatasetProductionScreen    from './DatasetProductionScreen';
 import OracleValuationScreen      from './OracleValuationScreen';
 import SmartSplitScreen           from './SmartSplitScreen';
 import HistoryPanel               from './HistoryPanel';
@@ -21,9 +22,10 @@ const queryClient = new QueryClient({
 
 // ─── 步骤元数据 ────────────────────────────────────────────────────
 const STEPS = [
-  { id: 1, label: '资产录入',   short: '录入' },
-  { id: 2, label: '预言机估值', short: '估值' },
-  { id: 3, label: '合约分账',   short: '分账' },
+  { id: 1, label: '素材上传',   short: '上传' },
+  { id: 2, label: '数据集生产', short: '生产' },
+  { id: 3, label: '预言机估值', short: '估值' },
+  { id: 4, label: '合约分账',   short: '分账' },
 ];
 
 // ─── 进度条组件 ────────────────────────────────────────────────────
@@ -148,6 +150,10 @@ function AppInner() {
   const [showHistory, setShowHistory]       = useState(false);
   const [showAnalytics, setShowAnalytics]   = useState(false);
   const [stepHistory, setStepHistory]       = useState([]);
+  // 数据集生产新增状态
+  const [materialId, setMaterialId]         = useState(null);
+  const [packageId, setPackageId]           = useState(null);
+  const [datasetPackage, setDatasetPackage] = useState(null);
 
   const goTo = useCallback((nextStep) => {
     setStepHistory(h => [...h, currentStep]);
@@ -172,8 +178,35 @@ function AppInner() {
     setImageData(null);
     setVideoData(null);
     setValuationResult(null);
+    setMaterialId(null);
+    setPackageId(null);
+    setDatasetPackage(null);
   }, []);
 
+  // Step 1: 素材上传完成 → 进入 Step 2 数据集生产
+  const handleMaterialUploaded = useCallback((matId, data, category, audioB64, imgB64, videoB64) => {
+    setMaterialId(matId);
+    setAssetData(data);
+    setAssetCategory(category);
+    setAudioData(audioB64 ?? null);
+    setImageData(imgB64 ?? null);
+    setVideoData(videoB64 ?? null);
+    goTo(2);
+  }, [goTo]);
+
+  // Step 2: 数据集生产完成 → 进入 Step 3 估值（把数据集包描述作为估值输入）
+  const handleDatasetProduced = useCallback((pkg) => {
+    setDatasetPackage(pkg);
+    setPackageId(pkg.package_id);
+    // 用数据集包信息构造估值输入
+    setAssetData(`${pkg.name}｜${pkg.domain}｜${pkg.total_samples}条样本｜均质${pkg.avg_quality}`);
+    setAssetCategory('text');
+    setIsZkMode(true);
+    setSceneOverride(null);
+    goTo(3);
+  }, [goTo]);
+
+  // Step 1旧兼容入口（直接录入模式，跳过生产）
   const handleInputComplete = useCallback((data, category, zkEnabled, override, audioB64, imgB64, videoB64) => {
     setAssetData(data);
     setAssetCategory(category);
@@ -182,12 +215,13 @@ function AppInner() {
     setAudioData(audioB64 ?? null);
     setImageData(imgB64 ?? null);
     setVideoData(videoB64 ?? null);
-    goTo(2);
+    goTo(3);
   }, [goTo]);
 
+  // Step 3: 估值完成 → Step 4 分账
   const handleValuationNext = useCallback((result) => {
     setValuationResult(result);
-    goTo(3);
+    goTo(4);
   }, [goTo]);
 
   const canGoBack = stepHistory.length > 0 && currentStep > 1;
@@ -209,10 +243,20 @@ function AppInner() {
         {currentStep === 1 && (
           <DataInputScreen
             onComplete={handleInputComplete}
+            onMaterialUploaded={handleMaterialUploaded}
             onHistory={() => setShowHistory(true)}
           />
         )}
         {currentStep === 2 && (
+          <DatasetProductionScreen
+            materialId={materialId}
+            assetData={assetData}
+            assetCategory={assetCategory}
+            onProduced={handleDatasetProduced}
+            onSkip={() => goTo(3)}
+          />
+        )}
+        {currentStep === 3 && (
           <OracleValuationScreen
             assetData={assetData}
             assetCategory={assetCategory}
@@ -224,10 +268,11 @@ function AppInner() {
             onNext={handleValuationNext}
           />
         )}
-        {currentStep === 3 && (
+        {currentStep === 4 && (
           <SmartSplitScreen
             valuationResult={valuationResult}
             assetCategory={assetCategory}
+            datasetPackage={datasetPackage}
             onRestart={handleRestart}
             onBack={goBack}
           />

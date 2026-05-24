@@ -868,6 +868,18 @@ async def detect_collision_endpoint(req: CollisionRequest):
     return result
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# 挂载数据集生产系统路由
+# 业务链路: 素材上传 → 自动标注 → 质检去重 → 打包 → 预言机估值 → 链上确权 → 分润
+# ═══════════════════════════════════════════════════════════════════════
+try:
+    from dataset_api import dataset_router
+    app.include_router(dataset_router)
+    print("✅ [dataset] 数据集生产系统已启用（/api/dataset/* /api/creator/* /api/platform/*）")
+except Exception as _ds_err:
+    print(f"!! [dataset] 数据集模块加载失败（仅预言机模式运行）: {_ds_err}")
+
+
 if __name__ == "__main__":
     import uvicorn
     _host = os.environ.get("BACKEND_HOST", "0.0.0.0")

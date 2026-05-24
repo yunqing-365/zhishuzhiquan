@@ -90,11 +90,70 @@ def init_db() -> bool:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_modality ON valuations(modality)"
             )
-            # ★ v3: 对旧库执行迁移（新建库此步骤无副作用）
+            # ── 数据集生产系统表 ────────────────────────────────────
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS pipeline_jobs (
+                    job_id       TEXT PRIMARY KEY,
+                    name         TEXT,
+                    stage        TEXT,
+                    dataset_type TEXT,
+                    domain       TEXT,
+                    total_materials INTEGER DEFAULT 0,
+                    annotated    INTEGER DEFAULT 0,
+                    scored       INTEGER DEFAULT 0,
+                    deduped      INTEGER DEFAULT 0,
+                    packed       INTEGER DEFAULT 0,
+                    package_id   TEXT,
+                    error        TEXT,
+                    timings      TEXT,
+                    started_at   TEXT,
+                    finished_at  TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS dataset_packages (
+                    package_id       TEXT PRIMARY KEY,
+                    name             TEXT,
+                    dataset_type     TEXT,
+                    version          TEXT,
+                    domain           TEXT,
+                    total_samples    INTEGER DEFAULT 0,
+                    approved_samples INTEGER DEFAULT 0,
+                    avg_quality      REAL DEFAULT 0,
+                    platinum_count   INTEGER DEFAULT 0,
+                    gold_count       INTEGER DEFAULT 0,
+                    price_cny        REAL DEFAULT 0,
+                    creator_contributions TEXT,
+                    export_paths     TEXT,
+                    created_at       TEXT,
+                    valuation_result TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS creator_revenue (
+                    record_id          TEXT PRIMARY KEY,
+                    package_id         TEXT,
+                    creator_id         TEXT,
+                    total_revenue      REAL,
+                    contribution_ratio REAL,
+                    creator_share      REAL,
+                    platform_fee       REAL,
+                    status             TEXT DEFAULT 'pending',
+                    created_at         TEXT,
+                    paid_at            TEXT
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_creator_revenue ON creator_revenue(creator_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_pipeline_jobs ON pipeline_jobs(started_at DESC)"
+            )
+            # ★ v4: 对旧库执行迁移
             _migrate_db(conn)
             conn.commit()
             conn.close()
-        print(f">> [storage] SQLite 初始化完成 (v3): {DB_PATH}")
+        print(f">> [storage] SQLite 初始化完成 (v4-dataset): {DB_PATH}")
         return True
     except Exception as e:
         print(f"!! [storage] 初始化失败 (不影响估值): {e}")
