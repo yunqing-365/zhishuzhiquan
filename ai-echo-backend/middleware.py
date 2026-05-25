@@ -84,12 +84,23 @@ class TokenBucket:
 
 # ── 路由级限流配置 ────────────────────────────────────────────────────
 # path_prefix -> (capacity, refill_per_second)
-# /api/valuate: 每分钟 20 次（capacity=20, refill=20/60≈0.33/s）
-# /api/history: 宽松，每分钟 60 次
-# 其他路由:     不限流
+# /api/valuate:              每分钟 20 次
+# /api/history:              每分钟 60 次
+# /api/dataset/ingest:       每分钟 30 次（单条上传）
+# /api/dataset/batch_ingest: 每分钟 5 次（批量上传，重操作）
+# /api/dataset/produce:      每分钟 10 次（生产任务）
+# /api/dataset/sell:         每分钟 20 次（购买）
+# /api/auth/login:           每分钟 10 次（防爆破）
+# /api/auth/register:        每分钟 5 次（防批量注册）
 ROUTE_LIMITS: dict[str, tuple[int, float]] = {
-    "/api/valuate": (20, 20 / 60),
-    "/api/history": (60, 60 / 60),
+    "/api/valuate":               (20,  20  / 60),
+    "/api/history":               (60,  60  / 60),
+    "/api/dataset/ingest":        (30,  30  / 60),
+    "/api/dataset/batch_ingest":  (5,   5   / 60),
+    "/api/dataset/produce":       (10,  10  / 60),
+    "/api/dataset/sell":          (20,  20  / 60),
+    "/api/auth/login":            (10,  10  / 60),
+    "/api/auth/register":         (5,   5   / 60),
 }
 
 _buckets: dict[str, TokenBucket] = {

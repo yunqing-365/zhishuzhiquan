@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+import threading
 import uuid
 from collections import defaultdict
 from datetime import datetime
@@ -90,75 +92,204 @@ class RevenueCalculator:
 # 创作者收益账本（内存版，生产应替换为 DB）
 # ════════════════════════════════════════════════════════
 
+# ── SQLite 建表（幂等，与 storage.DB_PATH 复用同一文件）──────────
+try:
+    import sys as _sys
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+    import storage as _storage
+    _DB_PATH = _storage.DB_PATH
+except Exception:
+    _DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "history.db")
+
+_ledger_lock = threading.Lock()
+
+def _ensure_ledger_tables():
+    try:
+        conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ledger_balances (
+                creator_id TEXT PRIMARY KEY,
+                pending    REAL DEFAULT 0.0,
+                paid       REAL DEFAULT 0.0,
+                updated_at TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ledger_records (
+                record_id          TEXT PRIMARY KEY,
+                package_id         TEXT NOT NULL,
+                creator_id         TEXT NOT NULL,
+                total_revenue      REAL DEFAULT 0.0,
+                contribution_ratio REAL DEFAULT 0.0,
+                creator_share      REAL DEFAULT 0.0,
+                platform_fee       REAL DEFAULT 0.0,
+                status             TEXT DEFAULT 'pending',
+                created_at         TEXT NOT NULL,
+                paid_at            TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ledger_creator ON ledger_records(creator_id)")
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"!! [ledger] 建表失败: {e}")
+
+_ensure_ledger_tables()
+
+
 class CreatorLedger:
     """
-    创作者收益总账
-    记录每位创作者的累计收益、待结算金额、已结算金额
+    创作者收益总账 v2
 
-    生产环境建议替换为 PostgreSQL + 行级锁确保原子性
+    升级日志:
+      [P0修复] 所有写操作加 threading.Lock，消除并发覆盖
+      [P0修复] 持久化从 JSON 迁移到 SQLite（与 history.db 共用）
+      [保留]   所有公开接口向后兼容
     """
 
     def __init__(self, persist_path: str = None):
-        # {creator_id: {"pending": float, "paid": float, "records": [record_id,...]}}
-        self._ledger: Dict[str, dict] = defaultdict(
-            lambda: {"pending": 0.0, "paid": 0.0, "records": []}
-        )
-        self._records: Dict[str, RevenueRecord] = {}
-        self._persist_path = persist_path or os.path.join(
-            os.path.dirname(os.path.dirname(__file__)), "data", "creator_ledger.json"
-        )
-        self._load()
+        # persist_path 保留参数签名兼容性，实际不再使用（改为 SQLite）
+        self._persist_path = persist_path  # 仅用于旧数据迁移检查
+        self._migrate_json_if_needed()
+
+    def _migrate_json_if_needed(self):
+        """首次启动时把旧 JSON 账本迁移进 SQLite，之后不再重复。"""
+        if not self._persist_path or not os.path.exists(self._persist_path):
+            return
+        try:
+            with open(self._persist_path, encoding='utf-8') as f:
+                data = json.load(f)
+            if not data.get('ledger'):
+                return
+            print(f">> [ledger] 迁移旧 JSON 账本 → SQLite ...")
+            with _ledger_lock:
+                conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+                for cid, v in data.get('ledger', {}).items():
+                    conn.execute(
+                        """INSERT OR IGNORE INTO ledger_balances
+                           (creator_id, pending, paid, updated_at) VALUES (?,?,?,?)""",
+                        (cid, v.get('pending',0), v.get('paid',0), datetime.utcnow().isoformat())
+                    )
+                for rid, r in data.get('records', {}).items():
+                    conn.execute(
+                        """INSERT OR IGNORE INTO ledger_records
+                           (record_id,package_id,creator_id,total_revenue,
+                            contribution_ratio,creator_share,platform_fee,
+                            status,created_at,paid_at)
+                           VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                        (rid, r['package_id'], r['creator_id'],
+                         r['total_revenue'], r['contribution_ratio'],
+                         r['creator_share'], r['platform_fee'],
+                         r['status'], r['created_at'], r.get('paid_at'))
+                    )
+                conn.commit()
+                conn.close()
+            os.rename(self._persist_path, self._persist_path + '.migrated')
+            print(">> [ledger] 迁移完成，旧文件已改名为 .migrated")
+        except Exception as e:
+            print(f"!! [ledger] 迁移失败（不影响运行）: {e}")
 
     def add_records(self, records: List[RevenueRecord]):
-        """入账新的分润记录"""
-        for r in records:
-            self._records[r.record_id] = r
-            self._ledger[r.creator_id]["pending"] += r.creator_share
-            self._ledger[r.creator_id]["records"].append(r.record_id)
-        self._save()
+        """入账新的分润记录（线程安全）"""
+        now = datetime.utcnow().isoformat()
+        with _ledger_lock:
+            try:
+                conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+                for r in records:
+                    conn.execute(
+                        """INSERT OR REPLACE INTO ledger_records
+                           (record_id,package_id,creator_id,total_revenue,
+                            contribution_ratio,creator_share,platform_fee,
+                            status,created_at)
+                           VALUES (?,?,?,?,?,?,?,?,?)""",
+                        (r.record_id, r.package_id, r.creator_id,
+                         r.total_revenue, r.contribution_ratio,
+                         r.creator_share, r.platform_fee,
+                         r.status, r.created_at.isoformat())
+                    )
+                    # 原子更新余额：INSERT + ON CONFLICT 累加
+                    conn.execute(
+                        """INSERT INTO ledger_balances (creator_id, pending, paid, updated_at)
+                           VALUES (?, ?, 0.0, ?)
+                           ON CONFLICT(creator_id) DO UPDATE SET
+                             pending    = pending + excluded.pending,
+                             updated_at = excluded.updated_at""",
+                        (r.creator_id, r.creator_share, now)
+                    )
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"!! [ledger] add_records 失败: {e}")
 
     def get_balance(self, creator_id: str) -> dict:
         """查询创作者账户余额"""
-        entry = self._ledger.get(creator_id, {"pending": 0.0, "paid": 0.0})
+        try:
+            conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+            row = conn.execute(
+                "SELECT pending, paid FROM ledger_balances WHERE creator_id=?",
+                (creator_id,)
+            ).fetchone()
+            conn.close()
+            pending = row[0] if row else 0.0
+            paid    = row[1] if row else 0.0
+        except Exception:
+            pending, paid = 0.0, 0.0
         return {
-            "creator_id":  creator_id,
-            "pending_cny": round(entry["pending"], 2),
-            "paid_cny":    round(entry["paid"], 2),
-            "total_earned": round(entry["pending"] + entry["paid"], 2),
+            "creator_id":   creator_id,
+            "pending_cny":  round(pending, 2),
+            "paid_cny":     round(paid, 2),
+            "total_earned": round(pending + paid, 2),
         }
 
     def settle(self, creator_id: str) -> Optional[dict]:
-        """
-        触发结算：将 pending → paid
-        低于最低结算阈值时拒绝
-        """
-        entry = self._ledger.get(creator_id)
-        if not entry or entry["pending"] < PAYMENT_THRESHOLD:
-            print(f"⚠️  {creator_id} 待结算金额 ¥{entry['pending'] if entry else 0:.2f} "
-                  f"< 最低阈值 ¥{PAYMENT_THRESHOLD}，暂不结算")
-            return None
-
-        amount = entry["pending"]
-        entry["paid"] += amount
-        entry["pending"] = 0.0
-
-        # 标记相关记录为已结算
-        for rid in entry["records"]:
-            if rid in self._records and self._records[rid].status == "pending":
-                self._records[rid].status = "paid"
-                self._records[rid].paid_at = datetime.utcnow()
-
-        self._save()
-        print(f"✅ 结算成功: {creator_id} 获得 ¥{amount:.2f}")
-        return {
-            "creator_id": creator_id,
-            "settled_amount": round(amount, 2),
-            "settled_at": datetime.utcnow().isoformat(),
-        }
+        """触发结算：将 pending → paid（线程安全，原子操作）"""
+        with _ledger_lock:
+            try:
+                conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+                row = conn.execute(
+                    "SELECT pending FROM ledger_balances WHERE creator_id=?",
+                    (creator_id,)
+                ).fetchone()
+                if not row or row[0] < PAYMENT_THRESHOLD:
+                    conn.close()
+                    print(f"⚠️  {creator_id} 待结算 ¥{row[0] if row else 0:.2f} < 阈值")
+                    return None
+                amount = row[0]
+                now    = datetime.utcnow().isoformat()
+                conn.execute(
+                    """UPDATE ledger_balances SET paid=paid+?, pending=0.0, updated_at=?
+                       WHERE creator_id=?""",
+                    (amount, now, creator_id)
+                )
+                conn.execute(
+                    """UPDATE ledger_records SET status='paid', paid_at=?
+                       WHERE creator_id=? AND status='pending'""",
+                    (now, creator_id)
+                )
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                print(f"!! [ledger] settle 失败: {e}")
+                return None
+        print(f"✅ 结算成功: {creator_id} ¥{amount:.2f}")
+        return {"creator_id": creator_id, "settled_amount": round(amount, 2),
+                "settled_at": datetime.utcnow().isoformat()}
 
     def get_all_balances(self) -> List[dict]:
         """获取所有创作者余额（管理后台用）"""
-        return [self.get_balance(cid) for cid in self._ledger]
+        try:
+            conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+            rows = conn.execute(
+                "SELECT creator_id, pending, paid FROM ledger_balances"
+            ).fetchall()
+            conn.close()
+            return [
+                {"creator_id": r[0], "pending_cny": round(r[1],2),
+                 "paid_cny": round(r[2],2), "total_earned": round(r[1]+r[2],2)}
+                for r in rows
+            ]
+        except Exception:
+            return []
 
     def get_top_earners(self, limit: int = 10) -> List[dict]:
         """收益排行榜"""
@@ -167,82 +298,33 @@ class CreatorLedger:
 
     def get_creator_records(self, creator_id: str) -> List[dict]:
         """查询创作者历史分润明细"""
-        entry = self._ledger.get(creator_id, {})
-        records = []
-        for rid in entry.get("records", []):
-            r = self._records.get(rid)
-            if r:
-                records.append({
-                    "record_id":      r.record_id,
-                    "package_id":     r.package_id,
-                    "contribution":   f"{r.contribution_ratio:.1%}",
-                    "sale_total":     r.total_revenue,
-                    "creator_share":  r.creator_share,
-                    "status":         r.status,
-                    "created_at":     r.created_at.isoformat(),
-                    "paid_at":        r.paid_at.isoformat() if r.paid_at else None,
-                })
-        return sorted(records, key=lambda x: x["created_at"], reverse=True)
-
-    # ── 持久化 ──────────────────────────────────────────
-
-    def _save(self):
-        os.makedirs(os.path.dirname(self._persist_path), exist_ok=True)
-        data = {
-            "ledger": {
-                cid: {
-                    "pending": v["pending"],
-                    "paid":    v["paid"],
-                    "records": v["records"],
-                }
-                for cid, v in self._ledger.items()
-            },
-            "records": {
-                rid: {
-                    "record_id":         r.record_id,
-                    "package_id":        r.package_id,
-                    "creator_id":        r.creator_id,
-                    "total_revenue":     r.total_revenue,
-                    "contribution_ratio": r.contribution_ratio,
-                    "creator_share":     r.creator_share,
-                    "platform_fee":      r.platform_fee,
-                    "status":            r.status,
-                    "created_at":        r.created_at.isoformat(),
-                    "paid_at":           r.paid_at.isoformat() if r.paid_at else None,
-                }
-                for rid, r in self._records.items()
-            },
-        }
         try:
-            with open(self._persist_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
+            conn = sqlite3.connect(_DB_PATH, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT * FROM ledger_records WHERE creator_id=?
+                   ORDER BY created_at DESC LIMIT 200""",
+                (creator_id,)
+            ).fetchall()
+            conn.close()
+            return [
+                {
+                    "record_id":          r["record_id"],
+                    "package_id":         r["package_id"],
+                    "contribution_ratio": round(r["contribution_ratio"], 4),
+                    "sale_total":         r["total_revenue"],
+                    "creator_share":      round(r["creator_share"], 2),
+                    "status":             r["status"],
+                    "created_at":         r["created_at"],
+                    "paid_at":            r["paid_at"],
+                }
+                for r in rows
+            ]
         except Exception as e:
-            print(f"⚠️  账本持久化失败: {e}")
+            print(f"!! [ledger] get_creator_records: {e}")
+            return []
 
-    def _load(self):
-        if not os.path.exists(self._persist_path):
-            return
-        try:
-            with open(self._persist_path, encoding="utf-8") as f:
-                data = json.load(f)
-            for cid, v in data.get("ledger", {}).items():
-                self._ledger[cid] = v
-            for rid, r in data.get("records", {}).items():
-                rec = RevenueRecord(
-                    record_id=r["record_id"],
-                    package_id=r["package_id"],
-                    creator_id=r["creator_id"],
-                    total_revenue=r["total_revenue"],
-                    contribution_ratio=r["contribution_ratio"],
-                    creator_share=r["creator_share"],
-                    platform_fee=r["platform_fee"],
-                    status=r["status"],
-                    created_at=datetime.fromisoformat(r["created_at"]),
-                    paid_at=datetime.fromisoformat(r["paid_at"]) if r["paid_at"] else None,
-                )
-                self._records[rid] = rec
-        except Exception as e:
-            print(f"⚠️  账本加载失败: {e}")
+    # _save / _load 已移除，所有写操作直接操作 SQLite（线程安全）
 
 
 # ════════════════════════════════════════════════════════

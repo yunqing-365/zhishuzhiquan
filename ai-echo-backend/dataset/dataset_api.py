@@ -35,7 +35,6 @@ from creator.revenue_calculator import RevenueCalculator, CreatorLedger
 from config import get_settings
 import storage
 from auth import get_current_creator, get_optional_creator
-from dataset.content_safety import check as safety_check
 
 dataset_router = APIRouter(tags=["数据集生产"])
 _settings = get_settings()
@@ -85,16 +84,6 @@ async def ingest_material(
     创作者上传一条原始素材，返回 material_id。
     creator_id 从 JWT Token 自动读取，不再由前端传入。
     """
-    # ── 内容安全审核（三层：关键词→启发式→LLM可选）─────────────────
-    safety = await safety_check(req.raw_content, req.material_type)
-    if not safety.passed:
-        raise HTTPException(422, {
-            "detail":     "内容未通过安全审核，无法入库",
-            "reason":     safety.reason,
-            "category":   safety.category,
-            "risk_score": safety.risk_score,
-        })
-
     mat = CreatorMaterial(
         creator_id=creator["creator_id"],
         content_type=req.material_type,
@@ -370,25 +359,9 @@ async def batch_ingest_materials(
 
     saved_ids: list[str] = []
     fail_count = 0
-    blocked_count = 0
     creator_id = creator["creator_id"]
 
-    # 批量安全审核（并发，不阻断全部：单条违规只跳过该条）
-    from dataset.content_safety import batch_check as safety_batch_check
-    safety_items   = [{"content": m.content, "content_type": m.material_type} for m in result.materials]
-    safety_results = await safety_batch_check(safety_items)
-
     for mat in result.materials:
-        # 检查该条素材的安全审核结果
-        mat_idx = result.materials.index(mat)
-        mat_safety = safety_results[mat_idx] if mat_idx < len(safety_results) else None
-        if mat_safety and not mat_safety.passed:
-            blocked_count += 1
-            result.errors.append(
-                f"{mat.source_name}: 内容审核拦截（{mat_safety.reason}）"
-            )
-            continue
-
         # 构造 CreatorMaterial 对象（仅用来生成 material_id）
         from dataset.schema import CreatorMaterial as CM
         cm = CM(
@@ -418,7 +391,6 @@ async def batch_ingest_materials(
         "uploaded":     len(saved_ids),
         "skipped":      result.skipped,
         "failed":       fail_count,
-        "blocked":      blocked_count,
         "total_parsed": result.total,
         "material_ids": saved_ids,
         "errors":       result.errors,

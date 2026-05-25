@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RainbowKitProvider, darkTheme }    from '@rainbow-me/rainbowkit';
 import '@rainbow-me/rainbowkit/styles.css';
 
-import { History, BarChart2 }     from 'lucide-react';
+import { History, BarChart2, Store, User, LogOut, LogIn } from 'lucide-react';
 import DataInputScreen            from './DataInputScreen';
 import DatasetProductionScreen    from './DatasetProductionScreen';
 import OracleValuationScreen      from './OracleValuationScreen';
@@ -13,7 +13,10 @@ import HistoryPanel               from './HistoryPanel';
 import AnalyticsDashboard         from './AnalyticsDashboard';
 import WalletButton               from './web3/WalletButton';
 import { wagmiConfig, targetChain } from './web3/config';
-import { useApiHealth }           from './api';
+import { useApiHealth, authClient, tokenStore } from './api';
+import DatasetCatalog             from './DatasetCatalog';
+import CreatorDashboard           from './CreatorDashboard';
+import AuthPanel                  from './AuthPanel';
 
 // ── React Query Client（wagmi v2 依赖）────────────────────────────
 const queryClient = new QueryClient({
@@ -45,7 +48,7 @@ const BackendStatus = () => {
   );
 };
 
-const ProgressBar = ({ step, category, onBack, canGoBack, onHistory, onAnalytics }) => {
+const ProgressBar = ({ step, category, onBack, canGoBack, onHistory, onAnalytics, onCatalog, onCreator, onAuth, loggedCreator }) => {
   const modeColor = {
     audio: 'bg-emerald-500',
     image: 'bg-amber-500',
@@ -115,6 +118,24 @@ const ProgressBar = ({ step, category, onBack, canGoBack, onHistory, onAnalytics
         <span className="hidden sm:inline">看板</span>
       </button>
 
+      {/* ★ 数据集市场 */}
+      <button
+        onClick={onCatalog}
+        className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-700 text-slate-400 hover:text-slate-200 hover:border-cyan-500/50 text-xs font-mono transition-all"
+      >
+        <Store className="w-3.5 h-3.5" />
+        <span className="hidden sm:inline">市场</span>
+      </button>
+
+      {/* ★ 创作者控制台 */}
+      <button
+        onClick={onCreator}
+        className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-700 text-slate-400 hover:text-slate-200 hover:border-emerald-500/50 text-xs font-mono transition-all"
+      >
+        <User className="w-3.5 h-3.5" />
+        <span className="hidden sm:inline">我的</span>
+      </button>
+
       {/* 模态标记 */}
       <div className={`shrink-0 text-[10px] font-mono px-2 py-1 rounded border ${
         category === 'audio' ? 'text-emerald-400 border-emerald-500/30 bg-emerald-900/20' :
@@ -127,6 +148,22 @@ const ProgressBar = ({ step, category, onBack, canGoBack, onHistory, onAnalytics
 
       {/* ★ 后端心跳状态 */}
       <BackendStatus />
+
+      {/* ★ 登录状态按钮 */}
+      <button
+        onClick={onAuth}
+        className={`shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-mono transition-all ${
+          loggedCreator
+            ? 'border-emerald-700 text-emerald-400 hover:bg-emerald-900/20'
+            : 'border-slate-700 text-slate-400 hover:text-slate-200 hover:border-slate-500'
+        }`}
+      >
+        {loggedCreator ? (
+          <><User className="w-3.5 h-3.5" /><span className="hidden sm:inline max-w-20 truncate">{loggedCreator.display_name || loggedCreator.username}</span></>
+        ) : (
+          <><LogIn className="w-3.5 h-3.5" /><span className="hidden sm:inline">登录</span></>
+        )}
+      </button>
 
       {/* ★ 钱包连接按钮（步骤3时高亮） */}
       <div className="shrink-0">
@@ -149,6 +186,10 @@ function AppInner() {
   const [valuationResult, setValuationResult] = useState(null);
   const [showHistory, setShowHistory]       = useState(false);
   const [showAnalytics, setShowAnalytics]   = useState(false);
+  const [showCatalog, setShowCatalog]       = useState(false);
+  const [showCreator, setShowCreator]       = useState(false);
+  const [showAuth, setShowAuth]             = useState(false);
+  const [loggedCreator, setLoggedCreator]   = useState(() => tokenStore.getCreator());
   const [stepHistory, setStepHistory]       = useState([]);
   // 数据集生产新增状态
   const [materialId, setMaterialId]         = useState(null);
@@ -236,6 +277,10 @@ function AppInner() {
           canGoBack={canGoBack}
           onHistory={() => setShowHistory(true)}
           onAnalytics={() => setShowAnalytics(true)}
+          onCatalog={() => setShowCatalog(true)}
+          onCreator={() => setShowCreator(true)}
+          onAuth={() => setShowAuth(true)}
+          loggedCreator={loggedCreator}
         />
       )}
 
@@ -281,6 +326,15 @@ function AppInner() {
 
       <HistoryPanel isOpen={showHistory} onClose={() => setShowHistory(false)} />
       <AnalyticsDashboard isOpen={showAnalytics} onClose={() => setShowAnalytics(false)} />
+      <DatasetCatalog isOpen={showCatalog} onClose={() => setShowCatalog(false)} />
+      <CreatorDashboard isOpen={showCreator} onClose={() => setShowCreator(false)} />
+      <AuthPanel
+        isOpen={showAuth}
+        onClose={() => setShowAuth(false)}
+        onAuthChange={(type, data) => {
+          setLoggedCreator(type === 'logout' ? null : tokenStore.getCreator());
+        }}
+      />
     </div>
   );
 }

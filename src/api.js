@@ -1,40 +1,64 @@
 /**
- * AI-Echo 统一 API 客户端
+ * AI-Echo 统一 API 客户端  v6
  * ========================
- * 架构升级 v5 — 前后端真实联通层
- *
- * 解决的核心问题:
- *   - 原来每个组件各自写 fetch，超时/重试/错误处理逻辑散落
- *   - 生产环境需要动态切换后端地址
- *   - 无统一错误类型，前端无法区分"后端挂了"vs"业务拒绝"
+ * 升级日志 v6:
+ *   [新增] authClient — 注册、登录、登出、获取当前用户
+ *   [新增] apiFetch 自动从 sessionStorage 读取 JWT Token，注入 Authorization 头
+ *   [新增] 401 响应自动清除 Token 并触发页面事件（供 App.jsx 监听跳转登录）
  *
  * 用法:
- *   import { apiClient } from './api'
+ *   import { apiClient, authClient } from './api'
  *   const result = await apiClient.valuate({ asset_category, description, ... })
+ *   await authClient.login({ username, password })
  */
 
 // ── 后端地址（开发时由 Vite 代理，生产时从环境变量读取）────────────
 const BASE_URL = import.meta.env.PROD
-  ? (import.meta.env.VITE_API_URL || '')   // 生产：空字符串 = 同源，或填具体域名
-  : '';                                     // 开发：Vite proxy 拦截 /api/*
+  ? (import.meta.env.VITE_API_URL || '')
+  : '';
 
 // ── 默认超时（ms）──────────────────────────────────────────────────
 const DEFAULT_TIMEOUT_MS = 8000;
+
+// ── Token 管理（存入 sessionStorage，关闭标签页自动清除）──────────
+const TOKEN_KEY    = 'zszq_token';
+const CREATOR_KEY  = 'zszq_creator';
+
+export const tokenStore = {
+  get:   ()        => sessionStorage.getItem(TOKEN_KEY),
+  set:   (t, info) => {
+    sessionStorage.setItem(TOKEN_KEY, t);
+    if (info) sessionStorage.setItem(CREATOR_KEY, JSON.stringify(info));
+  },
+  clear: ()        => {
+    sessionStorage.removeItem(TOKEN_KEY);
+    sessionStorage.removeItem(CREATOR_KEY);
+  },
+  getCreator: () => {
+    try { return JSON.parse(sessionStorage.getItem(CREATOR_KEY) || 'null'); }
+    catch { return null; }
+  },
+};
 
 // ── 结构化错误类型 ─────────────────────────────────────────────────
 export class ApiError extends Error {
   constructor(message, type = 'UNKNOWN', status = null) {
     super(message);
     this.name  = 'ApiError';
-    this.type  = type;   // 'TIMEOUT' | 'NETWORK' | 'SERVER' | 'REJECTED'
+    this.type  = type;   // 'TIMEOUT' | 'NETWORK' | 'SERVER' | 'REJECTED' | 'AUTH'
     this.status = status;
   }
 }
 
-// ── 核心 fetch 包装（统一超时 + 错误分类）─────────────────────────
+// ── 核心 fetch 包装（统一超时 + 错误分类 + 自动注入 Token）─────────
 async function apiFetch(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  // 自动注入 JWT
+  const authHeaders = {};
+  const token = tokenStore.get();
+  if (token) authHeaders['Authorization'] = `Bearer ${token}`;
 
   try {
     const res = await fetch(`${BASE_URL}${path}`, {
@@ -42,11 +66,17 @@ async function apiFetch(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
       signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
+        ...authHeaders,
         ...options.headers,
       },
     });
     clearTimeout(timer);
 
+    if (res.status === 401) {
+      tokenStore.clear();
+      window.dispatchEvent(new CustomEvent('auth:logout'));
+      throw new ApiError('登录已过期，请重新登录', 'AUTH', 401);
+    }
     if (!res.ok) {
       const body = await res.text().catch(() => '');
       throw new ApiError(
@@ -65,6 +95,52 @@ async function apiFetch(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
     throw new ApiError(err.message || '网络错误', 'NETWORK');
   }
 }
+
+// ── 认证客户端（注册 / 登录 / 登出）──────────────────────────────
+export const authClient = {
+  async register({ username, password, display_name = '', email = '' }) {
+    const data = await apiFetch('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, display_name, email }),
+    });
+    tokenStore.set(data.access_token, {
+      creator_id: data.creator_id,
+      username: data.username,
+      display_name: data.display_name,
+    });
+    return data;
+  },
+
+  async login({ username, password }) {
+    const data = await apiFetch('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    });
+    tokenStore.set(data.access_token, {
+      creator_id: data.creator_id,
+      username: data.username,
+      display_name: data.display_name,
+    });
+    return data;
+  },
+
+  logout() {
+    tokenStore.clear();
+    window.dispatchEvent(new CustomEvent('auth:logout'));
+  },
+
+  async me() {
+    return apiFetch('/api/auth/me', { method: 'GET' });
+  },
+
+  isLoggedIn() {
+    return !!tokenStore.get();
+  },
+
+  currentCreator() {
+    return tokenStore.getCreator();
+  },
+};
 
 // ── 指数退避重试（TIMEOUT / NETWORK 类型自动重试，SERVER 类不重试）──
 async function withRetry(fn, retries = 2) {
@@ -353,3 +429,89 @@ export async function detectCollision(params) {
   const res = await apiClient.post('/api/detect_collision', params);
   return res.data;
 }
+
+
+// ════════════════════════════════════════════════════════════════════
+// v3 新增：数据集目录 + 创作者收益 API 客户端
+// ════════════════════════════════════════════════════════════════════
+
+export const datasetClient = {
+
+  // ── 数据集目录（买家侧）─────────────────────────────────────────
+
+  /** 列出所有数据集包（公开目录） */
+  async listPackages(limit = 50) {
+    return apiFetch(`/api/dataset/packages?limit=${limit}`, { method: 'GET' });
+  },
+
+  /** 数据集包详情 */
+  async getPackage(packageId) {
+    return apiFetch(`/api/dataset/package/${packageId}`, { method: 'GET' });
+  },
+
+  /** 记录购买（触发分润） */
+  async purchase(packageId, priceCny) {
+    return apiFetch('/api/dataset/sell', {
+      method: 'POST',
+      body: JSON.stringify({
+        package_id: packageId,
+        buyer_id:   'buyer_' + Date.now(),
+        price_cny:  priceCny,
+      }),
+    });
+  },
+
+  // ── 创作者侧 ────────────────────────────────────────────────────
+
+  /** 上传单条素材（需登录）*/
+  async ingest(materialType, rawContent, metadata = {}) {
+    return apiFetch('/api/dataset/ingest', {
+      method: 'POST',
+      body: JSON.stringify({ material_type: materialType, raw_content: rawContent, metadata }),
+    });
+  },
+
+  /** 列出当前创作者的素材（需登录）*/
+  async listMaterials(limit = 50) {
+    return apiFetch(`/api/dataset/materials?limit=${limit}`, { method: 'GET' });
+  },
+
+  /** 启动生产任务（需登录）*/
+  async produce(materialIds, opts = {}) {
+    return apiFetch('/api/dataset/produce', {
+      method: 'POST',
+      body: JSON.stringify({
+        material_ids: materialIds,
+        target_types: opts.targetTypes  ?? ['sft', 'dpo'],
+        name:         opts.name         ?? '未命名数据集',
+        description:  opts.description  ?? '',
+        min_quality:  opts.minQuality   ?? 5.0,
+        price_cny:    opts.priceCny     ?? 0,
+      }),
+    });
+  },
+
+  // ── 创作者收益 ──────────────────────────────────────────────────
+
+  /** 当前登录创作者的收益汇总 */
+  async myEarnings() {
+    const creator = tokenStore.getCreator();
+    if (!creator) throw new ApiError('未登录', 'AUTH');
+    return apiFetch(`/api/creator/${creator.creator_id}/earnings`, { method: 'GET' });
+  },
+
+  /** 全平台收益排行榜 */
+  async leaderboard(limit = 20) {
+    return apiFetch(`/api/creator/leaderboard?limit=${limit}`, { method: 'GET' });
+  },
+
+  /** 平台整体统计 */
+  async platformStats() {
+    return apiFetch('/api/platform/stats', { method: 'GET' });
+  },
+
+  /** 任务列表 */
+  async listJobs(limit = 50) {
+    return apiFetch(`/api/dataset/jobs?limit=${limit}`, { method: 'GET' });
+  },
+};
