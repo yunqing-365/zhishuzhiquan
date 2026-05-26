@@ -104,7 +104,7 @@ const resolveAmmConfig = (valuationResult, assetCategory) => {
 };
 
 // ── SmartSplitScreen（v4：完全由 valuationResult 驱动，消灭 hardcode）─
-const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, onBack }) => {
+const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', datasetPackage, onRestart, onBack }) => {
   const [showReport, setShowReport] = useState(false);
   // ── 从 oracle 结果提取真实定价参数 ────────────────────────────────
   const fv           = valuationResult?.final_valuation;
@@ -268,6 +268,27 @@ const SmartSplitScreen = ({ valuationResult, assetCategory = 'text', onRestart, 
 
           {/* 左侧控制台 */}
           <div className="lg:col-span-4 flex flex-col space-y-6">
+
+            {/* 数据集溯源卡（有 datasetPackage 时显示）*/}
+            {datasetPackage && (
+              <div className="bg-slate-950/80 border border-violet-800/40 rounded-2xl p-4 text-xs font-mono space-y-2">
+                <p className="text-violet-400 font-bold uppercase tracking-widest text-[10px] flex items-center gap-1.5">
+                  <Database className="w-3 h-3" /> 数据集来源溯源
+                </p>
+                <p className="text-slate-300 truncate">{datasetPackage.name || '未命名数据集'}</p>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-slate-500">
+                  <span>样本数 <span className="text-cyan-400">{datasetPackage.total_samples ?? 0}</span></span>
+                  <span>均质 <span className="text-amber-400">{datasetPackage.avg_quality?.toFixed(2) ?? '—'}</span></span>
+                  <span>SFT <span className="text-slate-300">{datasetPackage.sft_count ?? 0}</span></span>
+                  <span>DPO <span className="text-slate-300">{datasetPackage.dpo_count ?? 0}</span></span>
+                </div>
+                <p className="text-slate-700 truncate">ID: {datasetPackage.package_id?.slice(0, 16)}…</p>
+                {datasetPackage.export_paths?.sft_parquet && (
+                  <span className="text-[10px] px-1.5 py-0.5 bg-violet-900/30 text-violet-400 border border-violet-800/40 rounded">Parquet ✓</span>
+                )}
+              </div>
+            )}
+
             <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-6 relative overflow-hidden shadow-inner">
               <h3 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-4 flex items-center">
                 <Server className="w-4 h-4 mr-2 text-indigo-400" /> 模拟大模型采买/拦截

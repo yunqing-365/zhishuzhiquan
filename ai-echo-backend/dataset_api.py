@@ -201,7 +201,7 @@ async def produce_dataset(
         "job_id":    job_id,
         "status":    "started",
         "materials": len(materials),
-        "stream_url": "/api/dataset/jobs",
+        "stream_url": f"/api/dataset/job/{job_id}/stream",   # ✅ 修正：指向真实 SSE 端点
     }
 
 
@@ -274,9 +274,19 @@ async def sell_dataset(req: SellRequest):
 
 @dataset_router.get("/api/creator/{creator_id}/earnings", summary="创作者收益汇总")
 async def creator_earnings(creator_id: str):
+    """收益汇总：从 CreatorLedger（唯一账本）读取。"""
     balance = _ledger.get_balance(creator_id)
     records = _ledger.get_creator_records(creator_id)
     return {"creator_id": creator_id, "balance": balance, "records": records}
+
+
+@dataset_router.post("/api/creator/settle", summary="触发创作者结算")
+async def settle_creator(creator: dict = Depends(get_current_creator)):
+    """将当前创作者的 pending 收益标记为 settled（paid）。"""
+    result = _ledger.settle(creator["creator_id"])
+    if not result:
+        return {"settled": False, "message": "无待结算收益"}
+    return {"settled": True, **result}
 
 
 @dataset_router.get("/api/creator/leaderboard", summary="创作者贡献排行榜")
@@ -454,3 +464,159 @@ async def resolve_alert(alert_id: str):
     if not ok:
         raise HTTPException(404, f"告警 {alert_id} 不存在")
     return {"alert_id": alert_id, "resolved": True}
+
+
+# ════════════════════════════════════════════════════════════════════
+# v3 新增：SQLite 账本 & 统计查询端点（P1 升级）
+# ════════════════════════════════════════════════════════════════════
+import store.db as _store_db
+
+
+@dataset_router.get("/api/creator/balance", summary="查询创作者余额")
+async def get_creator_balance(
+    creator: dict = Depends(get_current_creator),
+):
+    """
+    从 CreatorLedger（唯一真实账本）读取余额。
+    v3 修正：pipeline 分润只写 CreatorLedger，此处统一对齐。
+    """
+    creator_id = creator["creator_id"]
+    balance    = _ledger.get_balance(creator_id)          # {pending_cny, paid_cny, total_earned}
+    records    = _ledger.get_creator_records(creator_id)
+    return {
+        "creator_id":      creator_id,
+        "balance_cny":     balance.get("total_earned", 0.0),
+        "pending_cny":     balance.get("pending_cny", 0.0),
+        "paid_cny":        balance.get("paid_cny", 0.0),
+        "revenue_summary": {
+            "record_count":    len(records),
+            "total_earned":    balance.get("total_earned", 0.0),
+            "total_settled":   balance.get("paid_cny", 0.0),
+            "pending":         balance.get("pending_cny", 0.0),
+        },
+    }
+
+
+@dataset_router.get("/api/creator/ledger", summary="创作者账本流水")
+async def get_creator_ledger(
+    limit: int = Query(50, le=200),
+    creator: dict = Depends(get_current_creator),
+):
+    """查询创作者分润流水（从 CreatorLedger 读取，与 pipeline 分润写入统一）"""
+    records = _ledger.get_creator_records(creator["creator_id"])
+    # 格式化为前端期望的 entries 结构
+    entries = [
+        {
+            "entry_id":    r.get("record_id", ""),
+            "creator_id":  r.get("creator_id", ""),
+            "amount":      r.get("creator_share", 0.0),
+            "balance_after": 0.0,   # CreatorLedger 记录不含累计余额，前端忽略
+            "entry_type":  "credit",
+            "reference_id": r.get("package_id", ""),
+            "note":        f"数据集销售分润 · 包 {r.get('package_id','')[:8]}…",
+            "created_at":  r.get("created_at", ""),
+        }
+        for r in records[:limit]
+    ]
+    return {"entries": entries, "count": len(entries)}
+
+
+@dataset_router.get("/api/platform/stats", summary="平台整体统计")
+async def platform_stats():
+    """
+    平台统计：样本/包数量从 store.db 读取；
+    总收益从 CreatorLedger 读取（pipeline 分润的实际写入位置）。
+    """
+    db_stats = _store_db.get_platform_stats()
+    all_balances = _ledger.get_all_balances()
+    total_revenue = sum(b.get("total_earned", 0.0) for b in all_balances)
+    creator_count = len(all_balances)
+    return {
+        **db_stats,
+        "total_revenue":  round(total_revenue, 2),
+        "creator_count":  creator_count,
+    }
+
+
+@dataset_router.get("/api/dataset/packages", summary="数据集包列表")
+async def list_packages(limit: int = Query(20, le=100)):
+    """列出最近生产的数据集包（从 SQLite 读取，持久化）"""
+    return {"packages": _store_db.list_packages(limit)}
+
+
+# ════════════════════════════════════════════════════════════════════
+# v3 修复：SSE 实时进度推送（DatasetProductionScreen 订阅此端点）
+# 原 stream_url 指向 /api/dataset/jobs（错误），现在提供真实 SSE 流
+# ════════════════════════════════════════════════════════════════════
+import asyncio as _asyncio
+from fastapi.responses import StreamingResponse as _StreamingResponse
+import json as _json_sse
+
+
+@dataset_router.get(
+    "/api/dataset/job/{job_id}/stream",
+    summary="任务进度 SSE 流（前端 EventSource 订阅）",
+)
+async def job_stream(job_id: str):
+    """
+    Server-Sent Events：每秒推送一次任务状态，直到 done/failed。
+    前端 DatasetProductionScreen 通过 EventSource 订阅。
+    """
+    async def _generate():
+        max_polls = 600   # 最多等 10 分钟
+        for _ in range(max_polls):
+            job = _pipeline.get_job_status(job_id)
+            if not job:
+                yield f"data: {_json_sse.dumps({'error': 'job_not_found'})}\n\n"
+                return
+
+            yield f"data: {_json_sse.dumps(job)}\n\n"
+
+            if job.get("stage") in ("done", "failed"):
+                return
+
+            await _asyncio.sleep(1)
+
+        # 超时
+        yield f"data: {_json_sse.dumps({'stage': 'failed', 'error': 'SSE timeout'})}\n\n"
+
+    return _StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # 关闭 Nginx 缓冲，保证实时推送
+        },
+    )
+
+
+# ════════════════════════════════════════════════════════════════════
+# v3 新增：版本管理端点（versioning v2 — SQLite）
+# ════════════════════════════════════════════════════════════════════
+from dataset.versioning import version_manager as _vm
+
+
+@dataset_router.get("/api/dataset/versions", summary="列出数据集版本")
+async def list_versions(
+    name:  Optional[str] = Query(None, description="按数据集名过滤"),
+    limit: int           = Query(50, le=200),
+):
+    """列出所有版本快照（SQLite 持久化，重启不丢）"""
+    return {"versions": _vm.list_versions(name=name, limit=limit)}
+
+
+@dataset_router.get("/api/dataset/version/{version_id}", summary="版本详情")
+async def get_version(version_id: str):
+    v = _vm.get_version(version_id)
+    if not v:
+        raise HTTPException(404, "版本不存在")
+    return v
+
+
+@dataset_router.get("/api/dataset/version/diff", summary="版本 Diff")
+async def version_diff(
+    from_id: str = Query(..., alias="from"),
+    to_id:   str = Query(..., alias="to"),
+):
+    """对比两个版本：样本增减、质量变化"""
+    return _vm.diff(from_id, to_id)

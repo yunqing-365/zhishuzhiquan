@@ -65,7 +65,10 @@ function QualityBadge({ score }) {
 
 // ── 数据集卡片 ────────────────────────────────────────────────────
 function DatasetCard({ pkg, onSelect, onBuy, buying }) {
-  const { package_id, name, dataset_type, domain, total_samples, avg_quality, price_cny, created_at } = pkg;
+  const { package_id, name, dataset_type, domain, total_samples, avg_quality, price_cny, created_at, export_paths } = pkg;
+  const hasParquet = export_paths && (export_paths.sft_parquet || export_paths.dpo_parquet);
+  const exportPathsParsed = typeof export_paths === 'string' ? (() => { try { return JSON.parse(export_paths); } catch { return {}; } })() : (export_paths || {});
+  const parquetAvailable = exportPathsParsed.sft_parquet || exportPathsParsed.dpo_parquet;
 
   return (
     <div
@@ -88,6 +91,11 @@ function DatasetCard({ pkg, onSelect, onBuy, buying }) {
             {domain && (
               <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">
                 {DOMAIN_LABELS[domain] ?? domain}
+              </span>
+            )}
+            {parquetAvailable && (
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-violet-900/30 text-violet-400 border border-violet-800/40">
+                Parquet ✓
               </span>
             )}
           </div>

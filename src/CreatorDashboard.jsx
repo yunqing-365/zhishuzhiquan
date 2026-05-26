@@ -9,7 +9,8 @@ import {
   X, TrendingUp, Database, Layers, Clock, Award,
   RefreshCw, UploadCloud, Cpu, CheckCircle2, AlertCircle,
   Loader2, ChevronRight, Users, Coins, BarChart2,
-  FileText, Package, Star,
+  FileText, Package, Star, Bell, ShieldAlert, Download,
+  ArrowDownToLine, Activity,
 } from 'lucide-react';
 import { datasetClient, authClient, tokenStore } from './api';
 import BatchUploadPanel from './BatchUploadPanel';
@@ -133,17 +134,28 @@ export default function CreatorDashboard({ isOpen, onClose }) {
   const [loading, setLoading]       = useState(false);
   const [showBatchUpload, setShowBatchUpload] = useState(false);
   const [error, setError]           = useState('');
+  // v3 新增
+  const [ledger, setLedger]         = useState([]);
+  const [balance, setBalance]       = useState(null);
+  const [monitor, setMonitor]       = useState(null);
+  const [alerts, setAlerts]         = useState([]);
+  const [versions, setVersions]     = useState([]);
 
   const loadAll = useCallback(async () => {
     if (!isOpen) return;
     setLoading(true); setError('');
     try {
-      const [earningsRes, matsRes, jobsRes, lbRes, statsRes] = await Promise.allSettled([
+      const [earningsRes, matsRes, jobsRes, lbRes, statsRes, balRes, ledgerRes, monRes, alertsRes, versionsRes] = await Promise.allSettled([
         creator ? datasetClient.myEarnings() : Promise.resolve(null),
         creator ? datasetClient.listMaterials(50) : Promise.resolve({ materials: [] }),
         datasetClient.listJobs(30),
         datasetClient.leaderboard(10),
         datasetClient.platformStats(),
+        creator ? datasetClient.myBalance() : Promise.resolve(null),
+        creator ? datasetClient.myLedger(30) : Promise.resolve(null),
+        datasetClient.monitorSnapshot(),
+        datasetClient.alerts(false, 20),
+        datasetClient.listVersions(null, 20),
       ]);
 
       if (earningsRes.status === 'fulfilled' && earningsRes.value)
@@ -156,6 +168,16 @@ export default function CreatorDashboard({ isOpen, onClose }) {
         setLeaderboard(lbRes.value.leaderboard ?? []);
       if (statsRes.status === 'fulfilled')
         setPlatformStats(statsRes.value);
+      if (balRes.status === 'fulfilled' && balRes.value)
+        setBalance(balRes.value);
+      if (ledgerRes.status === 'fulfilled' && ledgerRes.value)
+        setLedger(ledgerRes.value.entries ?? []);
+      if (monRes.status === 'fulfilled')
+        setMonitor(monRes.value);
+      if (alertsRes.status === 'fulfilled')
+        setAlerts(alertsRes.value.alerts ?? []);
+      if (versionsRes.status === 'fulfilled')
+        setVersions(versionsRes.value.versions ?? []);
     } catch (e) {
       setError(e.message || '数据加载失败');
     } finally {
@@ -177,6 +199,8 @@ export default function CreatorDashboard({ isOpen, onClose }) {
     { id: 'overview',     label: '总览',   icon: BarChart2 },
     { id: 'materials',    label: `素材 ${materials.length}`, icon: Database },
     { id: 'jobs',         label: `任务 ${jobs.length}`,      icon: Cpu },
+    { id: 'ledger',       label: '账本',   icon: FileText },
+    { id: 'monitor',      label: alerts.length > 0 ? `告警 ${alerts.length}` : '监控', icon: alerts.length > 0 ? Bell : Activity },
     { id: 'leaderboard',  label: '排行榜',  icon: Award },
   ];
 
@@ -250,28 +274,29 @@ export default function CreatorDashboard({ isOpen, onClose }) {
             {tab === 'overview' && (
               <div className="space-y-5">
                 {/* 我的收益 */}
-                {creator && earnings && (
+                {creator && (earnings || balance) && (
                   <div>
                     <h2 className="text-slate-400 text-xs font-semibold uppercase tracking-widest mb-3 flex items-center gap-2">
                       <Coins size={12} /> 我的收益
+                      {balance && <span className="text-[10px] normal-case font-normal text-emerald-500 border border-emerald-800/40 bg-emerald-900/20 px-1.5 py-0.5 rounded font-mono">SQLite ✓</span>}
                     </h2>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                       <StatCard
                         icon={TrendingUp}
-                        label="累计收益"
-                        value={fmtCny(earnings.balance?.total_earned ?? 0)}
+                        label="账本余额"
+                        value={fmtCny(balance?.balance_cny ?? earnings?.balance?.total_earned ?? 0)}
                         accent="text-amber-400"
                       />
                       <StatCard
                         icon={CheckCircle2}
-                        label="已结算"
-                        value={fmtCny(earnings.balance?.paid ?? 0)}
+                        label="累计收益"
+                        value={fmtCny(balance?.revenue_summary?.total_earned ?? earnings?.balance?.paid ?? 0)}
                         accent="text-emerald-400"
                       />
                       <StatCard
                         icon={Clock}
                         label="待结算"
-                        value={fmtCny(earnings.balance?.pending ?? 0)}
+                        value={fmtCny(balance?.revenue_summary?.pending ?? earnings?.balance?.pending ?? 0)}
                         accent="text-cyan-400"
                       />
                     </div>
@@ -285,12 +310,12 @@ export default function CreatorDashboard({ isOpen, onClose }) {
                       <BarChart2 size={12} /> 平台统计
                     </h2>
                     <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-                      <StatCard icon={Database}  label="素材总量"  value={(platformStats.total_materials ?? 0).toLocaleString()} />
-                      <StatCard icon={Package}   label="数据集包"  value={(platformStats.total_packages ?? 0).toLocaleString()} />
-                      <StatCard icon={Users}     label="创作者数"  value={(platformStats.total_creators ?? 0).toLocaleString()} />
-                      <StatCard icon={Coins}     label="平台总收益" value={fmtCny(platformStats.total_revenue_cny ?? 0)} accent="text-amber-400" />
-                      <StatCard icon={Cpu}       label="生产任务"  value={(platformStats.total_jobs ?? 0).toLocaleString()} />
-                      <StatCard icon={Star}      label="待复核"    value={(platformStats.pending_review ?? 0).toLocaleString()} accent="text-amber-400" />
+                      <StatCard icon={Database}  label="总样本量"  value={(platformStats.total_samples ?? platformStats.total_materials ?? 0).toLocaleString()} />
+                      <StatCard icon={Package}   label="数据集包"  value={(platformStats.packages ?? platformStats.total_packages ?? 0).toLocaleString()} />
+                      <StatCard icon={Users}     label="创作者数"  value={(platformStats.creator_count ?? platformStats.total_creators ?? 0).toLocaleString()} />
+                      <StatCard icon={Coins}     label="平台总收益" value={fmtCny(platformStats.total_revenue ?? platformStats.total_revenue_cny ?? 0)} accent="text-amber-400" />
+                      <StatCard icon={Cpu}       label="SFT样本"   value={(platformStats.sft_samples ?? 0).toLocaleString()} />
+                      <StatCard icon={Star}      label="DPO样本"   value={(platformStats.dpo_samples ?? 0).toLocaleString()} accent="text-cyan-400" />
                     </div>
                   </div>
                 )}
@@ -382,6 +407,156 @@ export default function CreatorDashboard({ isOpen, onClose }) {
                   <div className="flex flex-col items-center justify-center h-40 text-slate-600 gap-2">
                     <Cpu size={28} />
                     <p className="text-sm">暂无生产任务</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* ── 账本 Tab（v3 SQLite 持久化）──────────────────────── */}
+            {tab === 'ledger' && (
+              <div className="space-y-4">
+                {!creator ? (
+                  <div className="flex flex-col items-center justify-center h-40 text-slate-600 gap-2">
+                    <FileText size={28} />
+                    <p className="text-sm">登录后查看账本流水</p>
+                  </div>
+                ) : (
+                  <>
+                    {balance && (
+                      <div className="grid grid-cols-2 gap-3 mb-2">
+                        <StatCard icon={Coins} label="当前余额" value={fmtCny(balance.balance_cny ?? 0)} accent="text-amber-400" />
+                        <StatCard icon={CheckCircle2} label="收益笔数" value={balance.revenue_summary?.record_count ?? 0} />
+                      </div>
+                    )}
+                    <h2 className="text-slate-400 text-xs font-semibold uppercase tracking-widest flex items-center gap-2">
+                      <FileText size={12} /> 账本流水（SQLite 持久化）
+                    </h2>
+                    {ledger.length > 0 ? (
+                      <div className="rounded-xl border border-slate-800 bg-slate-900/40 divide-y divide-slate-800/60">
+                        {ledger.map((entry, i) => (
+                          <div key={entry.entry_id ?? i} className="flex items-center gap-3 px-4 py-3">
+                            <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border shrink-0 ${
+                              entry.entry_type === 'credit'
+                                ? 'text-emerald-400 bg-emerald-900/20 border-emerald-800/40'
+                                : 'text-red-400 bg-red-900/20 border-red-800/40'
+                            }`}>
+                              {entry.entry_type === 'credit' ? '入账' : '支出'}
+                            </span>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-slate-300 text-xs truncate">{entry.note || '—'}</p>
+                              <p className="text-slate-600 text-[10px] mt-0.5">{fmtTime(entry.created_at)} · 余额 {fmtCny(entry.balance_after)}</p>
+                            </div>
+                            <span className={`font-mono text-sm font-bold shrink-0 ${
+                              entry.entry_type === 'credit' ? 'text-emerald-400' : 'text-red-400'
+                            }`}>
+                              {entry.entry_type === 'credit' ? '+' : '-'}{fmtCny(entry.amount)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center h-40 text-slate-600 gap-2">
+                        <FileText size={28} />
+                        <p className="text-sm">暂无账本记录</p>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
+            {/* ── 监控 Tab（v3 P0 监控埋点）────────────────────────── */}
+            {tab === 'monitor' && (
+              <div className="space-y-5">
+                {/* 未解决告警 */}
+                {alerts.length > 0 && (
+                  <div>
+                    <h2 className="text-slate-400 text-xs font-semibold uppercase tracking-widest mb-3 flex items-center gap-2">
+                      <Bell size={12} className="text-red-400" />
+                      <span className="text-red-400">未解决告警 {alerts.length}</span>
+                    </h2>
+                    <div className="rounded-xl border border-red-900/40 bg-red-950/20 divide-y divide-red-900/30">
+                      {alerts.map((a, i) => (
+                        <div key={a.alert_id ?? i} className="px-4 py-3 flex items-start gap-3">
+                          <ShieldAlert size={14} className={
+                            a.severity === 'CRITICAL' ? 'text-red-400 shrink-0 mt-0.5' :
+                            a.severity === 'ERROR'    ? 'text-orange-400 shrink-0 mt-0.5' :
+                                                        'text-amber-400 shrink-0 mt-0.5'
+                          } />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-slate-300 text-xs">{a.message}</p>
+                            <p className="text-slate-600 text-[10px] mt-0.5">
+                              {a.severity} · {a.stage} · {fmtTime(a.created_at)}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* 最近 job 阶段指标 */}
+                {monitor?.jobs?.length > 0 && (
+                  <div>
+                    <h2 className="text-slate-400 text-xs font-semibold uppercase tracking-widest mb-3 flex items-center gap-2">
+                      <Activity size={12} /> 最近生产任务指标
+                    </h2>
+                    <div className="rounded-xl border border-slate-800 bg-slate-900/40 divide-y divide-slate-800/60">
+                      {monitor.jobs.map((j, i) => (
+                        <div key={j.job_id ?? i} className="px-4 py-3 flex items-center gap-3">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-slate-300 text-xs font-mono truncate">{j.job_id?.slice(0, 16)}…</p>
+                            <p className="text-slate-600 text-[10px] mt-0.5">
+                              {j.stages_done} 阶段 · 输入 {j.total_input} → 输出 {j.total_output} · {j.total_time_s}s
+                            </p>
+                          </div>
+                          <div className="flex flex-col items-end gap-1">
+                            <span className="text-cyan-400 font-mono text-xs">质量 {j.avg_quality?.toFixed(1) ?? '—'}</span>
+                            {j.has_alert && <span className="text-[10px] text-red-400 font-mono">⚠ 有告警</span>}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {!monitor && !alerts.length && (
+                  <div className="flex flex-col items-center justify-center h-40 text-slate-600 gap-2">
+                    <Activity size={28} />
+                    <p className="text-sm">暂无监控数据</p>
+                  </div>
+                )}
+
+                {/* 版本历史（versioning v2 — SQLite）*/}
+                {versions.length > 0 && (
+                  <div>
+                    <h2 className="text-slate-400 text-xs font-semibold uppercase tracking-widest mb-3 flex items-center gap-2">
+                      <ArrowDownToLine size={12} /> 版本快照记录
+                    </h2>
+                    <div className="rounded-xl border border-slate-800 bg-slate-900/40 divide-y divide-slate-800/60">
+                      {versions.slice(0, 8).map((v, i) => (
+                        <div key={v.version_id ?? i} className="px-4 py-3 flex items-center gap-3">
+                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-cyan-400 border border-slate-700 shrink-0">
+                            v{v.version}
+                          </span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-slate-300 text-xs font-medium truncate">{v.name}</p>
+                            <p className="text-slate-600 text-[10px] mt-0.5">
+                              {v.total_samples} 样本 · 质量 {v.avg_quality?.toFixed(2)}
+                              {v.delta_samples !== 0 && (
+                                <span className={v.delta_samples > 0 ? 'text-emerald-500' : 'text-red-500'}>
+                                  {' '}({v.delta_samples > 0 ? '+' : ''}{v.delta_samples})
+                                </span>
+                              )}
+                              {' · '}{fmtTime(v.created_at)}
+                            </p>
+                          </div>
+                          {v.export_paths?.sft_parquet && (
+                            <span className="text-[10px] font-mono text-violet-400 shrink-0">Parquet</span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 )}
               </div>

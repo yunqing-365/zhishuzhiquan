@@ -176,7 +176,7 @@ const WaveformCanvas = ({ analyserRef, isRecording }) => {
 };
 
 // ─── 主组件 ─────────────────────────────────────────────────────────
-const DataInputScreen = ({ onComplete, onHistory }) => {
+const DataInputScreen = ({ onComplete, onMaterialUploaded, onHistory }) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress]         = useState(0);
   const [statusText, setStatusText]     = useState('');
@@ -407,13 +407,50 @@ const DataInputScreen = ({ onComplete, onHistory }) => {
 
     const steps = getProcessingSteps(assetCategory, enableZK);
     let cur = 0;
-    const interval = setInterval(() => {
+    const interval = setInterval(async () => {
       if (cur < steps.length) {
         setProgress(steps[cur].p);
         setStatusText(steps[cur].text);
         cur++;
       } else {
         clearInterval(interval);
+
+        // ── 如果有 onMaterialUploaded，先调 ingest API 拿 material_id ──
+        if (onMaterialUploaded) {
+          try {
+            const { tokenStore } = await import('./api');
+            const token = tokenStore.get();
+            if (token) {
+              const res = await fetch('/api/dataset/ingest', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                  material_type: assetCategory,
+                  raw_content: desc,
+                  metadata: {
+                    scene_override: sceneOverride || null,
+                    zk_mode: enableZK,
+                  },
+                }),
+              });
+              if (res.ok) {
+                const { material_id } = await res.json();
+                setTimeout(() => onMaterialUploaded(
+                  material_id, desc, assetCategory,
+                  audioB64 || null, imageB64 || null, videoB64 || null
+                ), 400);
+                return;
+              }
+            }
+          } catch (e) {
+            console.warn('[DataInputScreen] ingest 失败，降级到直接估值:', e.message);
+          }
+        }
+
+        // 降级：无 token / ingest 失败 / 无 onMaterialUploaded → 旧路径直接估值
         setTimeout(() => onComplete(desc, assetCategory, enableZK, sceneOverride || null, audioB64 || null, imageB64 || null, videoB64 || null), 1200);
       }
     }, 750);

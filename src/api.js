@@ -426,8 +426,10 @@ export function useWsValuate() {
 // 调用 POST /api/detect_collision
 // params: { description, asset_category, embedding?, exclude_hash?, top_k? }
 export async function detectCollision(params) {
-  const res = await apiClient.post('/api/detect_collision', params);
-  return res.data;
+  return apiFetch('/api/detect_collision', {
+    method: 'POST',
+    body: JSON.stringify(params),
+  });
 }
 
 
@@ -513,5 +515,52 @@ export const datasetClient = {
   /** 任务列表 */
   async listJobs(limit = 50) {
     return apiFetch(`/api/dataset/jobs?limit=${limit}`, { method: 'GET' });
+  },
+
+  // ── v3 新增：SQLite 账本 & 监控（对应后端 P1/P0 升级）────────────
+
+  /** 创作者余额（从 SQLite 账本读取，重启不丢） */
+  async myBalance() {
+    return apiFetch('/api/creator/balance', { method: 'GET' });
+  },
+
+  /** 创作者账本流水（SQLite，最近 N 条） */
+  async myLedger(limit = 50) {
+    return apiFetch(`/api/creator/ledger?limit=${limit}`, { method: 'GET' });
+  },
+
+  /** 平台流水线监控快照（阶段耗时 + 未解决告警） */
+  async monitorSnapshot() {
+    return apiFetch('/api/platform/monitor', { method: 'GET' });
+  },
+
+  /** 告警列表 */
+  async alerts(includeResolved = false, limit = 50) {
+    return apiFetch(
+      `/api/platform/alerts?include_resolved=${includeResolved}&limit=${limit}`,
+      { method: 'GET' }
+    );
+  },
+
+  /** 标记告警已解决 */
+  async resolveAlert(alertId) {
+    return apiFetch(`/api/platform/alerts/${alertId}/resolve`, { method: 'POST' });
+  },
+
+  /** 数据集版本列表（SQLite 持久化）*/
+  async listVersions(name = null, limit = 50) {
+    const params = new URLSearchParams({ limit });
+    if (name) params.set('name', name);
+    return apiFetch(`/api/dataset/versions?${params}`, { method: 'GET' });
+  },
+
+  /** 版本 Diff */
+  async versionDiff(fromId, toId) {
+    return apiFetch(`/api/dataset/version/diff?from=${fromId}&to=${toId}`, { method: 'GET' });
+  },
+
+  /** 数据集包列表（SQLite 持久化，重启不丢） */
+  async listPackagesSqlite(limit = 20) {
+    return apiFetch(`/api/dataset/packages?limit=${limit}`, { method: 'GET' });
   },
 };

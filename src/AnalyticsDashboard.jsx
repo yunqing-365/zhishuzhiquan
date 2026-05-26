@@ -13,7 +13,7 @@ import {
   X, TrendingUp, Database, Zap, Activity,
   BarChart2, FileText, Image as ImageIcon, Mic, Film, RefreshCw,
 } from 'lucide-react';
-import { apiClient } from './api';
+import { apiClient, datasetClient } from './api';
 
 // ── 模态元数据 ──────────────────────────────────────────────────────
 const MODALITY_META = {
@@ -104,18 +104,24 @@ export default function AnalyticsDashboard({ isOpen, onClose }) {
   const [tab,         setTab]         = useState('overview');
   const [autoRefresh, setAutoRefresh] = useState(false);
   const timerRef = useRef(null);
+  // v3 新增：数据集统计
+  const [datasetStats,    setDatasetStats]    = useState(null);
+  const [recentVersions,  setRecentVersions]  = useState([]);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const [statsData, histData] = await Promise.all([
+      const [statsData, histData, dsStats, versionsData] = await Promise.allSettled([
         apiClient.stats(),
         apiClient.history(60),
+        datasetClient.platformStats(),
+        datasetClient.listVersions(null, 10),
       ]);
-      setStats(statsData);
-      // 时间正序排列，用于走势图
-      setHistory([...(histData.records || [])].reverse());
+      if (statsData.status   === 'fulfilled') setStats(statsData.value);
+      if (histData.status    === 'fulfilled') setHistory([...(histData.value.records || [])].reverse());
+      if (dsStats.status     === 'fulfilled') setDatasetStats(dsStats.value);
+      if (versionsData.status === 'fulfilled') setRecentVersions(versionsData.value.versions || []);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -181,10 +187,11 @@ export default function AnalyticsDashboard({ isOpen, onClose }) {
 
   // ── 标签页定义 ────────────────────────────────────────────────────
   const TABS = [
-    { id: 'overview', label: '总览',  icon: Activity   },
-    { id: 'trends',   label: '走势',  icon: TrendingUp  },
-    { id: 'market',   label: '市场',  icon: BarChart2   },
-    { id: 'top',      label: '排行',  icon: Zap         },
+    { id: 'overview', label: '总览',   icon: Activity   },
+    { id: 'trends',   label: '走势',   icon: TrendingUp  },
+    { id: 'market',   label: '市场',   icon: BarChart2   },
+    { id: 'top',      label: '排行',   icon: Zap         },
+    { id: 'dataset',  label: '数据集', icon: Database    },
   ];
 
   return (
@@ -589,6 +596,87 @@ export default function AnalyticsDashboard({ isOpen, onClose }) {
                     </div>
                   );
                 })}
+              </div>
+            )}
+
+            {/* ── 数据集 Tab（v3 新增）────────────────────────────── */}
+            {tab === 'dataset' && (
+              <div className="space-y-5">
+                {datasetStats ? (
+                  <div>
+                    <p className="text-slate-500 text-[10px] font-mono uppercase tracking-widest mb-3">平台数据集统计</p>
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                      {[
+                        { label: '总样本量', val: (datasetStats.total_samples ?? 0).toLocaleString(),   color: 'text-cyan-400'   },
+                        { label: 'SFT 样本', val: (datasetStats.sft_samples ?? 0).toLocaleString(),     color: 'text-blue-400'   },
+                        { label: 'DPO 样本', val: (datasetStats.dpo_samples ?? 0).toLocaleString(),     color: 'text-violet-400' },
+                        { label: 'Pretrain', val: (datasetStats.pretrain_chunks ?? 0).toLocaleString(), color: 'text-amber-400'  },
+                        { label: '数据集包', val: (datasetStats.packages ?? 0).toLocaleString(),        color: 'text-emerald-400'},
+                        { label: '创作者数', val: (datasetStats.creator_count ?? 0).toLocaleString(),   color: 'text-pink-400'   },
+                      ].map(s => (
+                        <div key={s.label} className="bg-slate-900 border border-slate-800 rounded-xl p-3 text-center">
+                          <div className={`text-xl font-bold font-mono ${s.color}`}>{s.val}</div>
+                          <div className="text-slate-600 text-[10px] mt-0.5">{s.label}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {datasetStats.total_samples > 0 && (() => {
+                      const tot = datasetStats.total_samples;
+                      const sftPct = Math.round((datasetStats.sft_samples ?? 0) / tot * 100);
+                      const dpoPct = Math.round((datasetStats.dpo_samples ?? 0) / tot * 100);
+                      const ptPct  = 100 - sftPct - dpoPct;
+                      return (
+                        <div className="mt-3">
+                          <p className="text-slate-600 text-[10px] font-mono mb-1.5">样本类型分布</p>
+                          <div className="flex h-2 rounded-full overflow-hidden gap-0.5">
+                            <div className="bg-blue-500" style={{ width: `${sftPct}%` }} />
+                            <div className="bg-violet-500" style={{ width: `${dpoPct}%` }} />
+                            <div className="bg-amber-500"  style={{ width: `${ptPct}%`  }} />
+                          </div>
+                          <div className="flex gap-4 mt-1.5 text-[10px] font-mono text-slate-500">
+                            <span><span className="text-blue-400">■</span> SFT {sftPct}%</span>
+                            <span><span className="text-violet-400">■</span> DPO {dpoPct}%</span>
+                            <span><span className="text-amber-400">■</span> PT {ptPct}%</span>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                    {(datasetStats.total_revenue ?? 0) > 0 && (
+                      <div className="mt-3 flex items-center gap-2 text-xs text-slate-400 font-mono">
+                        <TrendingUp className="w-3.5 h-3.5 text-amber-400" />
+                        平台累计分润
+                        <span className="text-amber-300 font-bold">¥{datasetStats.total_revenue.toLocaleString('zh-CN', { minimumFractionDigits: 2 })}</span>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex flex-col items-center justify-center h-20 text-slate-700 text-xs gap-1">
+                    <Database className="w-5 h-5" />数据集统计加载中…
+                  </div>
+                )}
+                {recentVersions.length > 0 && (
+                  <div>
+                    <p className="text-slate-500 text-[10px] font-mono uppercase tracking-widest mb-3">最近版本快照</p>
+                    <div className="rounded-xl border border-slate-800 bg-slate-900/40 divide-y divide-slate-800/60">
+                      {recentVersions.map((v, i) => (
+                        <div key={v.version_id ?? i} className="flex items-center gap-3 px-4 py-2.5">
+                          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-cyan-400 border border-slate-700 shrink-0">v{v.version}</span>
+                          <div className="flex-1 min-w-0">
+                            <p className="text-slate-300 text-xs truncate">{v.name}</p>
+                            <p className="text-slate-600 text-[10px]">
+                              {(v.total_samples ?? 0).toLocaleString()} 样本 · 质量 {v.avg_quality?.toFixed(2) ?? '—'}
+                              {v.delta_samples !== 0 && <span className={v.delta_samples > 0 ? ' text-emerald-500' : ' text-red-500'}>{v.delta_samples > 0 ? ' +' : ' '}{v.delta_samples}</span>}
+                            </p>
+                          </div>
+                          {v.export_paths?.sft_parquet && <span className="text-[10px] font-mono text-violet-400 shrink-0">Parquet</span>}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {!datasetStats && !recentVersions.length && (
+                  <div className="text-xs text-slate-600 py-16 text-center">完成一次数据集生产后，统计信息将在此显示</div>
+                )}
               </div>
             )}
 

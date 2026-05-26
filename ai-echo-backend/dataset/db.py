@@ -1,0 +1,438 @@
+# store/db.py
+"""
+知数知圈 · SQLite 持久层 v1
+
+P1 升级：账本 & 样本全部迁移至 SQLite。
+  - SFT / DPO / Pretrain 样本持久化（重启不丢）
+  - 创作者收益账本（CreatorLedger）迁移至 SQLite，替代 JSON 文件
+  - 线程安全写入（asyncio + threading.Lock 双保险）
+
+数据库文件：ai-echo-backend/data/zszq.db
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sqlite3
+import threading
+import uuid
+from datetime import datetime
+from typing import Dict, List, Optional
+
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+DB_PATH   = os.path.join(_DATA_DIR, "zszq.db")
+
+_lock = threading.Lock()
+
+
+# ════════════════════════════════════════════════════════════════════
+# 初始化 & 迁移
+# ════════════════════════════════════════════════════════════════════
+
+def _get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")   # 写前日志，提高并发安全
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
+
+
+def init_db() -> None:
+    """建表（幂等）"""
+    os.makedirs(_DATA_DIR, exist_ok=True)
+    with _lock:
+        conn = _get_conn()
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS sft_samples (
+                sample_id      TEXT PRIMARY KEY,
+                material_id    TEXT NOT NULL,
+                creator_id     TEXT NOT NULL,
+                instruction    TEXT NOT NULL,
+                input          TEXT DEFAULT '',
+                output         TEXT NOT NULL,
+                quality_score  REAL DEFAULT 0.0,
+                quality_tier   TEXT DEFAULT 'silver',
+                domain         TEXT DEFAULT '',
+                language       TEXT DEFAULT 'zh',
+                token_count    INTEGER DEFAULT 0,
+                annotation_meta TEXT DEFAULT '{}',
+                created_at     TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS dpo_samples (
+                sample_id      TEXT PRIMARY KEY,
+                material_id    TEXT NOT NULL,
+                creator_id     TEXT NOT NULL,
+                prompt         TEXT NOT NULL,
+                chosen         TEXT NOT NULL,
+                rejected       TEXT NOT NULL,
+                quality_score  REAL DEFAULT 0.0,
+                quality_tier   TEXT DEFAULT 'silver',
+                domain         TEXT DEFAULT '',
+                language       TEXT DEFAULT 'zh',
+                token_count    INTEGER DEFAULT 0,
+                created_at     TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS pretrain_chunks (
+                chunk_id       TEXT PRIMARY KEY,
+                material_id    TEXT NOT NULL,
+                creator_id     TEXT NOT NULL,
+                text           TEXT NOT NULL,
+                quality_score  REAL DEFAULT 0.0,
+                domain         TEXT DEFAULT '',
+                language       TEXT DEFAULT 'zh',
+                token_count    INTEGER DEFAULT 0,
+                source_url     TEXT DEFAULT '',
+                created_at     TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS revenue_records (
+                record_id      TEXT PRIMARY KEY,
+                creator_id     TEXT NOT NULL,
+                package_id     TEXT NOT NULL,
+                buyer_id       TEXT DEFAULT '',
+                sale_amount    REAL NOT NULL,
+                creator_amount REAL NOT NULL,
+                platform_fee   REAL NOT NULL,
+                contribution_weight REAL DEFAULT 0.0,
+                sample_count   INTEGER DEFAULT 0,
+                token_count    INTEGER DEFAULT 0,
+                status         TEXT DEFAULT 'pending',  -- pending / settled / failed
+                created_at     TEXT DEFAULT (datetime('now')),
+                settled_at     TEXT DEFAULT ''
+            );
+
+            CREATE TABLE IF NOT EXISTS creator_ledger (
+                entry_id       TEXT PRIMARY KEY,
+                creator_id     TEXT NOT NULL,
+                amount         REAL NOT NULL,
+                balance_after  REAL NOT NULL,
+                entry_type     TEXT NOT NULL,  -- credit / debit / withdrawal
+                reference_id   TEXT DEFAULT '',
+                note           TEXT DEFAULT '',
+                created_at     TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS dataset_packages (
+                package_id     TEXT PRIMARY KEY,
+                name           TEXT NOT NULL,
+                description    TEXT DEFAULT '',
+                version        TEXT DEFAULT '1.0.0',
+                total_samples  INTEGER DEFAULT 0,
+                sft_count      INTEGER DEFAULT 0,
+                dpo_count      INTEGER DEFAULT 0,
+                pretrain_count INTEGER DEFAULT 0,
+                avg_quality    REAL DEFAULT 0.0,
+                price_cny      REAL DEFAULT 0.0,
+                license_type   TEXT DEFAULT 'enterprise_internal',
+                export_paths   TEXT DEFAULT '{}',
+                created_at     TEXT DEFAULT (datetime('now'))
+            );
+
+            -- 索引加速查询
+            CREATE INDEX IF NOT EXISTS idx_sft_creator   ON sft_samples(creator_id);
+            CREATE INDEX IF NOT EXISTS idx_dpo_creator   ON dpo_samples(creator_id);
+            CREATE INDEX IF NOT EXISTS idx_rev_creator   ON revenue_records(creator_id);
+            CREATE INDEX IF NOT EXISTS idx_rev_package   ON revenue_records(package_id);
+            CREATE INDEX IF NOT EXISTS idx_ledger_creator ON creator_ledger(creator_id);
+        """)
+        conn.commit()
+        conn.close()
+    print(f"✅ [store/db] SQLite 初始化完成: {DB_PATH}")
+
+
+# 启动时自动建表
+init_db()
+
+
+# ════════════════════════════════════════════════════════════════════
+# SFT / DPO / Pretrain 批量写入
+# ════════════════════════════════════════════════════════════════════
+
+async def bulk_insert_sft(samples) -> int:
+    """批量写入 SFT 样本（忽略重复 sample_id）"""
+    if not samples:
+        return 0
+
+    def _do():
+        with _lock:
+            conn = _get_conn()
+            try:
+                rows = []
+                for s in samples:
+                    rows.append((
+                        s.sample_id, s.material_id, s.creator_id,
+                        s.instruction, s.input, s.output,
+                        s.quality_score, str(s.quality_tier.value if hasattr(s.quality_tier, 'value') else s.quality_tier),
+                        s.domain, s.language, s.token_count,
+                        json.dumps(s.annotation_meta, ensure_ascii=False),
+                    ))
+                conn.executemany("""
+                    INSERT OR IGNORE INTO sft_samples
+                    (sample_id,material_id,creator_id,instruction,input,output,
+                     quality_score,quality_tier,domain,language,token_count,annotation_meta)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """, rows)
+                conn.commit()
+                return len(rows)
+            finally:
+                conn.close()
+
+    loop = asyncio.get_event_loop()
+    count = await loop.run_in_executor(None, _do)
+    return count
+
+
+async def bulk_insert_dpo(samples) -> int:
+    """批量写入 DPO 样本"""
+    if not samples:
+        return 0
+
+    def _do():
+        with _lock:
+            conn = _get_conn()
+            try:
+                rows = [(
+                    s.sample_id, s.material_id, s.creator_id,
+                    s.prompt, s.chosen, s.rejected,
+                    s.quality_score, str(s.quality_tier.value if hasattr(s.quality_tier, 'value') else s.quality_tier),
+                    s.domain, s.language, s.token_count,
+                ) for s in samples]
+                conn.executemany("""
+                    INSERT OR IGNORE INTO dpo_samples
+                    (sample_id,material_id,creator_id,prompt,chosen,rejected,
+                     quality_score,quality_tier,domain,language,token_count)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """, rows)
+                conn.commit()
+                return len(rows)
+            finally:
+                conn.close()
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _do)
+
+
+async def bulk_insert_pretrain(chunks) -> int:
+    """批量写入 Pretrain chunks"""
+    if not chunks:
+        return 0
+
+    def _do():
+        with _lock:
+            conn = _get_conn()
+            try:
+                rows = [(
+                    c.chunk_id, c.material_id, c.creator_id,
+                    c.text, c.quality_score,
+                    c.domain, c.language, c.token_count, c.source_url,
+                ) for c in chunks]
+                conn.executemany("""
+                    INSERT OR IGNORE INTO pretrain_chunks
+                    (chunk_id,material_id,creator_id,text,quality_score,
+                     domain,language,token_count,source_url)
+                    VALUES (?,?,?,?,?,?,?,?,?)
+                """, rows)
+                conn.commit()
+                return len(rows)
+            finally:
+                conn.close()
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _do)
+
+
+# ════════════════════════════════════════════════════════════════════
+# 收益记录
+# ════════════════════════════════════════════════════════════════════
+
+async def insert_revenue_records(records) -> int:
+    """批量写入分润记录"""
+    if not records:
+        return 0
+
+    def _do():
+        with _lock:
+            conn = _get_conn()
+            try:
+                rows = []
+                for r in records:
+                    rows.append((
+                        getattr(r, 'record_id', str(uuid.uuid4())),
+                        r.creator_id,
+                        r.package_id,
+                        getattr(r, 'buyer_id', ''),
+                        r.sale_amount,
+                        r.creator_amount,
+                        r.platform_fee,
+                        getattr(r, 'contribution_weight', 0.0),
+                        getattr(r, 'sample_count', 0),
+                        getattr(r, 'token_count', 0),
+                        'pending',
+                    ))
+                conn.executemany("""
+                    INSERT OR IGNORE INTO revenue_records
+                    (record_id,creator_id,package_id,buyer_id,sale_amount,creator_amount,
+                     platform_fee,contribution_weight,sample_count,token_count,status)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """, rows)
+                conn.commit()
+                return len(rows)
+            finally:
+                conn.close()
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _do)
+
+
+def get_creator_revenue(creator_id: str) -> dict:
+    """查询创作者总收益（同步版）"""
+    with _lock:
+        conn = _get_conn()
+        try:
+            row = conn.execute("""
+                SELECT
+                    COUNT(*) as record_count,
+                    COALESCE(SUM(creator_amount), 0) as total_earned,
+                    COALESCE(SUM(CASE WHEN status='settled' THEN creator_amount ELSE 0 END), 0) as total_settled,
+                    COALESCE(SUM(CASE WHEN status='pending' THEN creator_amount ELSE 0 END), 0) as pending
+                FROM revenue_records WHERE creator_id = ?
+            """, (creator_id,)).fetchone()
+            return dict(row) if row else {}
+        finally:
+            conn.close()
+
+
+# ════════════════════════════════════════════════════════════════════
+# 账本 (Ledger)
+# ════════════════════════════════════════════════════════════════════
+
+def ledger_credit(creator_id: str, amount: float, reference_id: str = "", note: str = "") -> dict:
+    """向创作者账本记入收益（同步，有锁）"""
+    with _lock:
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(CASE WHEN entry_type='credit' THEN amount ELSE -amount END), 0) as bal "
+                "FROM creator_ledger WHERE creator_id=?", (creator_id,)
+            ).fetchone()
+            balance_before = row["bal"] if row else 0.0
+            balance_after  = balance_before + amount
+
+            entry_id = str(uuid.uuid4())
+            conn.execute("""
+                INSERT INTO creator_ledger
+                (entry_id,creator_id,amount,balance_after,entry_type,reference_id,note)
+                VALUES (?,?,?,?,'credit',?,?)
+            """, (entry_id, creator_id, amount, balance_after, reference_id, note))
+            conn.commit()
+            return {"entry_id": entry_id, "balance_after": balance_after}
+        finally:
+            conn.close()
+
+
+def get_creator_balance(creator_id: str) -> float:
+    """查询创作者当前余额"""
+    with _lock:
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(CASE WHEN entry_type='credit' THEN amount ELSE -amount END), 0) as bal "
+                "FROM creator_ledger WHERE creator_id=?", (creator_id,)
+            ).fetchone()
+            return float(row["bal"]) if row else 0.0
+        finally:
+            conn.close()
+
+
+def get_ledger_history(creator_id: str, limit: int = 50) -> list:
+    """查询账本流水"""
+    with _lock:
+        conn = _get_conn()
+        try:
+            rows = conn.execute("""
+                SELECT * FROM creator_ledger WHERE creator_id=?
+                ORDER BY created_at DESC LIMIT ?
+            """, (creator_id, limit)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
+# ════════════════════════════════════════════════════════════════════
+# 数据集包
+# ════════════════════════════════════════════════════════════════════
+
+async def save_package(package) -> bool:
+    """持久化 DatasetPackage 元数据"""
+    def _do():
+        with _lock:
+            conn = _get_conn()
+            try:
+                export_paths = getattr(package, 'export_paths', {})
+                conn.execute("""
+                    INSERT OR REPLACE INTO dataset_packages
+                    (package_id,name,description,version,total_samples,sft_count,
+                     dpo_count,pretrain_count,avg_quality,price_cny,license_type,export_paths)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    package.package_id, package.name, package.description,
+                    getattr(package, 'version', '1.0.0'),
+                    package.total_samples, package.sft_count, package.dpo_count,
+                    package.pretrain_count, package.avg_quality, package.price_cny,
+                    package.license_type,
+                    json.dumps(export_paths, ensure_ascii=False),
+                ))
+                conn.commit()
+                return True
+            finally:
+                conn.close()
+
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _do)
+
+
+def list_packages(limit: int = 20) -> list:
+    """列出最近的数据集包"""
+    with _lock:
+        conn = _get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM dataset_packages ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            conn.close()
+
+
+# ════════════════════════════════════════════════════════════════════
+# 统计
+# ════════════════════════════════════════════════════════════════════
+
+def get_platform_stats() -> dict:
+    """平台整体统计（供仪表盘调用）"""
+    with _lock:
+        conn = _get_conn()
+        try:
+            sft_count   = conn.execute("SELECT COUNT(*) FROM sft_samples").fetchone()[0]
+            dpo_count   = conn.execute("SELECT COUNT(*) FROM dpo_samples").fetchone()[0]
+            pre_count   = conn.execute("SELECT COUNT(*) FROM pretrain_chunks").fetchone()[0]
+            pkg_count   = conn.execute("SELECT COUNT(*) FROM dataset_packages").fetchone()[0]
+            total_rev   = conn.execute("SELECT COALESCE(SUM(creator_amount),0) FROM revenue_records").fetchone()[0]
+            creator_cnt = conn.execute("SELECT COUNT(DISTINCT creator_id) FROM revenue_records").fetchone()[0]
+            return {
+                "sft_samples":    sft_count,
+                "dpo_samples":    dpo_count,
+                "pretrain_chunks": pre_count,
+                "total_samples":  sft_count + dpo_count + pre_count,
+                "packages":       pkg_count,
+                "total_revenue":  round(total_rev, 2),
+                "creator_count":  creator_cnt,
+            }
+        finally:
+            conn.close()
