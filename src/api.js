@@ -452,15 +452,52 @@ export const datasetClient = {
   },
 
   /** 记录购买（触发分润） */
-  async purchase(packageId, priceCny) {
+  async purchase(packageId, priceCny, buyerId = null) {
     return apiFetch('/api/dataset/sell', {
       method: 'POST',
       body: JSON.stringify({
         package_id: packageId,
-        buyer_id:   'buyer_' + Date.now(),
+        buyer_id:   buyerId || 'buyer_' + Date.now(),
         price_cny:  priceCny,
       }),
     });
+  },
+
+  /**
+   * 下载已购数据集文件
+   * @param {string} packageId
+   * @param {string} buyerId   - 与购买时相同的 buyer_id
+   * @param {'zip'|'jsonl'|'parquet'} fileType
+   * @returns {Promise<Blob>}  调用方负责触发浏览器下载
+   */
+  async downloadDataset(packageId, buyerId, fileType = 'zip') {
+    const token = tokenStore.get();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${BASE_URL}/api/dataset/download/${packageId}`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ buyer_id: buyerId, file_type: fileType }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ message: '下载失败' }));
+      throw new ApiError(err.detail?.message || err.message || '下载失败', 'SERVER', res.status);
+    }
+
+    const blob = await res.blob();
+    // 自动触发浏览器下载
+    const contentDisposition = res.headers.get('Content-Disposition') || '';
+    const nameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+    const filename = nameMatch ? nameMatch[1] : `dataset_${packageId}.${fileType}`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+    return blob;
   },
 
   // ── 创作者侧 ────────────────────────────────────────────────────

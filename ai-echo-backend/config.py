@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from functools import lru_cache
 
 try:
@@ -27,17 +28,43 @@ class Settings:
         "OPENAI_BASE_URL", "https://api.openai.com/v1"
     )
     openai_model:     str = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+    # 多模型投票副模型（留空则与主模型相同，走不同 temperature）
+    openai_model_b:   str = os.environ.get("OPENAI_MODEL_B", "")
 
-    # ── 数据集生产目录 ────────────────────────────────────────────────
+    # ── JWT 认证 ──────────────────────────────────────────────────────
+    jwt_secret_key:  str = os.environ.get(
+        "JWT_SECRET_KEY",
+        "zhishuzhiquan-dev-secret-please-change-in-production-2024"
+    )
+    jwt_algorithm:   str = os.environ.get("JWT_ALGORITHM", "HS256")
+    jwt_expire_days: int = int(os.environ.get("JWT_EXPIRE_DAYS", "30"))
+
+    # ── 数据存储路径 ──────────────────────────────────────────────────
     _data_dir = os.path.join(os.path.dirname(__file__), "data")
+
+    # 主 SQLite 数据库（样本、包元数据、版本快照）
+    sqlite_db_path: str = os.environ.get(
+        "SQLITE_DB_PATH", os.path.join(_data_dir, "zszq.db")
+    )
+    # 账本 SQLite（CreatorLedger，独立文件避免事务争用）
+    creator_ledger_db_path: str = os.environ.get(
+        "CREATOR_LEDGER_DB_PATH", os.path.join(_data_dir, "creator_ledger.db")
+    )
+    # 旧版 JSON 账本路径（仅供首次启动迁移，迁移完成后可忽略）
+    creator_ledger_json_path: str = os.environ.get(
+        "CREATOR_LEDGER_JSON_PATH", os.path.join(_data_dir, "creator_ledger.json")
+    )
+    # 数据集生产输出目录
     dataset_output_dir: str = os.environ.get(
         "DATASET_OUTPUT_DIR", os.path.join(_data_dir, "datasets")
     )
+    # 流水线断点状态目录
     pipeline_state_dir: str = os.environ.get(
         "PIPELINE_STATE_DIR", os.path.join(_data_dir, "pipeline_state")
     )
-    creator_ledger_path: str = os.environ.get(
-        "CREATOR_LEDGER_PATH", os.path.join(_data_dir, "creator_ledger.json")
+    # ChromaDB 向量库目录
+    chroma_db_dir: str = os.environ.get(
+        "CHROMA_DB_DIR", os.path.join(_data_dir, "chroma_db")
     )
 
     # ── 业务参数 ──────────────────────────────────────────────────────
@@ -47,15 +74,33 @@ class Settings:
     creator_revenue_ratio: float = float(
         os.environ.get("CREATOR_REVENUE_RATIO", "0.70")    # 创作者池 70%
     )
+    # 内容安全：是否启用 LLM 三层审核
+    enable_llm_safety: bool = os.environ.get(
+        "ENABLE_LLM_SAFETY", "false"
+    ).lower() == "true"
 
     # ── 后端网络 ──────────────────────────────────────────────────────
     backend_host: str = os.environ.get("BACKEND_HOST", "0.0.0.0")
     backend_port: int = int(os.environ.get("BACKEND_PORT", "8000"))
+    # 跨域白名单（逗号分隔）
+    allowed_origins: str = os.environ.get(
+        "ALLOWED_ORIGINS",
+        "http://localhost:5173,http://localhost:3000,http://localhost"
+    )
 
     def __init__(self):
-        # 确保目录存在
+        # 确保必要目录存在
         os.makedirs(self.dataset_output_dir, exist_ok=True)
         os.makedirs(self.pipeline_state_dir, exist_ok=True)
+        os.makedirs(self.chroma_db_dir, exist_ok=True)
+
+        # 生产环境密钥检查
+        if self.jwt_secret_key.startswith("zhishuzhiquan-dev-secret"):
+            warnings.warn(
+                "[config] 使用默认 JWT_SECRET_KEY！生产部署前请在 .env 中设置强随机密钥。",
+                UserWarning,
+                stacklevel=2,
+            )
 
 
 @lru_cache(maxsize=1)

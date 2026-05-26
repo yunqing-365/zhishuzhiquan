@@ -107,6 +107,19 @@ def init_db() -> None:
                 created_at     TEXT DEFAULT (datetime('now'))
             );
 
+            -- 购买记录（买家下载鉴权依据）
+            CREATE TABLE IF NOT EXISTS dataset_purchases (
+                sale_id        TEXT PRIMARY KEY,
+                package_id     TEXT NOT NULL,
+                buyer_id       TEXT NOT NULL,
+                price_cny      REAL DEFAULT 0.0,
+                purchased_at   TEXT DEFAULT (datetime('now')),
+                download_count INTEGER DEFAULT 0,
+                last_download  TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_purchase_buyer   ON dataset_purchases(buyer_id);
+            CREATE INDEX IF NOT EXISTS idx_purchase_package ON dataset_purchases(package_id);
+
             -- 索引加速查询
             CREATE INDEX IF NOT EXISTS idx_sft_creator   ON sft_samples(creator_id);
             CREATE INDEX IF NOT EXISTS idx_dpo_creator   ON dpo_samples(creator_id);
@@ -401,5 +414,56 @@ def get_platform_stats() -> dict:
                 "packages":        pkg_count,
                 # total_revenue / creator_count injected by dataset_api from CreatorLedger
             }
+        finally:
+            conn.close()
+
+
+# ════════════════════════════════════════════════════════════════════
+# 购买记录（买家下载鉴权）
+# ════════════════════════════════════════════════════════════════════
+
+def record_purchase(sale_id: str, package_id: str, buyer_id: str, price_cny: float) -> None:
+    """写入购买记录，幂等（同 sale_id 重复调用安全）。"""
+    with _lock:
+        conn = _get_conn()
+        try:
+            conn.execute(
+                """INSERT OR IGNORE INTO dataset_purchases
+                   (sale_id, package_id, buyer_id, price_cny)
+                   VALUES (?, ?, ?, ?)""",
+                (sale_id, package_id, buyer_id, price_cny),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def check_purchase(buyer_id: str, package_id: str) -> bool:
+    """检查 buyer_id 是否已购买 package_id。"""
+    with _lock:
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT sale_id FROM dataset_purchases WHERE buyer_id=? AND package_id=?",
+                (buyer_id, package_id),
+            ).fetchone()
+            return row is not None
+        finally:
+            conn.close()
+
+
+def increment_download(buyer_id: str, package_id: str) -> None:
+    """每次下载后递增计数并记录时间。"""
+    with _lock:
+        conn = _get_conn()
+        try:
+            conn.execute(
+                """UPDATE dataset_purchases
+                   SET download_count = download_count + 1,
+                       last_download  = datetime('now')
+                   WHERE buyer_id=? AND package_id=?""",
+                (buyer_id, package_id),
+            )
+            conn.commit()
         finally:
             conn.close()

@@ -25,8 +25,12 @@ from typing import List, Optional, Tuple
 # 配置
 # ════════════════════════════════════════════════════════════════════
 
-# 是否启用 LLM 二次审核（需要 OPENAI_API_KEY，会有额外延迟/费用）
-_LLM_SAFETY_ENABLED = os.environ.get("ENABLE_LLM_SAFETY", "false").lower() == "true"
+# 是否启用 LLM 二次审核（从 config.Settings 读取，统一入口）
+try:
+    from config import get_settings as _get_safety_settings
+    _LLM_SAFETY_ENABLED = _get_safety_settings().enable_llm_safety
+except Exception:
+    _LLM_SAFETY_ENABLED = os.environ.get("ENABLE_LLM_SAFETY", "false").lower() == "true"
 
 # 内容长度限制
 _MIN_CONTENT_LEN = 10       # 少于此直接拒绝
@@ -217,47 +221,197 @@ async def _layer3_llm(content: str) -> Optional[SafetyResult]:
 
 
 # ════════════════════════════════════════════════════════════════════
+# 层 4 — 非文本模态规则检查
+# ════════════════════════════════════════════════════════════════════
+
+# base64 编码的媒体内容：正常图片至少几 KB
+_MEDIA_MIN_B64_LEN = 100     # base64 长度 < 100 字符视为空/损坏
+# base64 最大长度：100MB 文件约 136MB base64
+_MEDIA_MAX_B64_LEN = 140_000_000
+
+
+def _layer_media_heuristic(content: str, content_type: str) -> Optional[SafetyResult]:
+    """
+    针对 image / audio / video 的启发式检查。
+
+    content 为 base64 编码或 data URI 格式。
+    检查：长度合法性、base64 字符集合法性、data URI MIME 一致性。
+    """
+    # 剥离 data URI 前缀（data:image/jpeg;base64,XXX）
+    raw = content
+    declared_mime = ""
+    if raw.startswith("data:"):
+        try:
+            header, raw = raw.split(",", 1)
+            declared_mime = header.split(";")[0].split(":")[1].lower()
+        except Exception:
+            return SafetyResult(
+                passed=False, risk_score=0.4, category="quality",
+                reason="data URI 格式错误，无法解析 MIME 类型",
+                layer="heuristic", details={"content_type": content_type},
+            )
+
+    # 长度检查
+    if len(raw) < _MEDIA_MIN_B64_LEN:
+        return SafetyResult(
+            passed=False, risk_score=0.3, category="quality",
+            reason=f"{content_type} 素材内容为空或过小（base64 长度 {len(raw)}）",
+            layer="heuristic", details={"b64_len": len(raw)},
+        )
+    if len(raw) > _MEDIA_MAX_B64_LEN:
+        return SafetyResult(
+            passed=False, risk_score=0.2, category="quality",
+            reason=f"{content_type} 素材超过单次上传上限（base64 > 140MB）",
+            layer="heuristic", details={"b64_len": len(raw)},
+        )
+
+    # base64 字符集合法性（防止注入非 base64 内容）
+    import re as _re
+    if not _re.match(r'^[A-Za-z0-9+/\s]+=*$', raw[:200]):
+        return SafetyResult(
+            passed=False, risk_score=0.5, category="quality",
+            reason=f"{content_type} 内容包含非 base64 字符，疑似格式错误或注入",
+            layer="heuristic", details={},
+        )
+
+    # MIME 与 content_type 的一致性检查
+    expected_mime_prefix = {
+        "image": "image/",
+        "audio": "audio/",
+        "video": "video/",
+    }.get(content_type, "")
+    if declared_mime and expected_mime_prefix:
+        if not declared_mime.startswith(expected_mime_prefix):
+            return SafetyResult(
+                passed=False, risk_score=0.6, category="quality",
+                reason=(
+                    f"MIME 类型与声明的素材类型不符："
+                    f"期望 {expected_mime_prefix}*，实际 {declared_mime}"
+                ),
+                layer="heuristic",
+                details={"declared_mime": declared_mime, "expected_prefix": expected_mime_prefix},
+            )
+
+    return None  # 通过
+
+
+async def _layer_media_llm(content: str, content_type: str) -> Optional[SafetyResult]:
+    """
+    可选：调用多模态 LLM 对图像内容做 NSFW 审核。
+    仅 content_type=image 且 ENABLE_LLM_SAFETY=true 时生效。
+    音频/视频的 LLM 审核成本过高，暂不启用。
+    """
+    if not _LLM_SAFETY_ENABLED or content_type != "image":
+        return None
+
+    try:
+        import aiohttp
+        import json as _json
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from config import get_settings
+        s = get_settings()
+        if not s.openai_api_key:
+            return None
+
+        # 构建 image_url（支持 base64 data URI 和 http URL）
+        if content.startswith("http"):
+            image_url = {"url": content}
+        else:
+            # 确保有 data URI 前缀
+            if not content.startswith("data:"):
+                content = f"data:image/jpeg;base64,{content}"
+            image_url = {"url": content}
+
+        payload = {
+            "model": s.openai_model,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": image_url},
+                    {"type": "text", "text": (
+                        "判断这张图片是否包含 NSFW（色情/暴力/血腥/仇恨）内容。"
+                        "只回答严格 JSON，不含 markdown："
+                        "{\"safe\":true/false,\"category\":\"nsfw/violence/hate/clean\","
+                        "\"reason\":\"...\",\"score\":0-1}"
+                    )},
+                ],
+            }],
+            "max_tokens": 100,
+            "temperature": 0.0,
+        }
+        headers = {
+            "Authorization": f"Bearer {s.openai_api_key}",
+            "Content-Type": "application/json",
+        }
+        async with aiohttp.ClientSession() as sess:
+            async with sess.post(
+                f"{s.openai_base_url}/chat/completions",
+                headers=headers, json=payload,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                data = await resp.json()
+                raw = data["choices"][0]["message"]["content"].strip()
+                raw = raw.lstrip("```json").lstrip("```").rstrip("```").strip()
+                result = _json.loads(raw)
+                if not result.get("safe", True):
+                    return SafetyResult(
+                        passed=False,
+                        risk_score=float(result.get("score", 0.9)),
+                        category=result.get("category", "nsfw"),
+                        reason=result.get("reason", "图像内容审核拒绝"),
+                        layer="llm",
+                        details=result,
+                    )
+    except Exception as e:
+        print(f"⚠️  [content_safety] 图像 LLM 审核失败（降级放行）: {e}")
+
+    return None
+
+
+# ════════════════════════════════════════════════════════════════════
 # 统一入口
 # ════════════════════════════════════════════════════════════════════
 
 async def check(content: str, content_type: str = "text") -> SafetyResult:
     """
-    对一条素材内容做三层安全审核。
+    对一条素材内容做多层安全审核。
 
     Args:
-        content:      原始内容字符串
+        content:      原始内容字符串（文本直接传，媒体传 base64 或 data URI）
         content_type: text / image / audio / video
-                      非 text 类型只做启发式检查，跳过关键词
 
     Returns:
         SafetyResult.passed = True 表示安全，可进入流水线
     """
-    # 非文本类型暂只做长度检查
-    if content_type != "text":
-        if len(content) < 4:
-            return SafetyResult(
-                passed=False, risk_score=0.2, category="quality",
-                reason="非文本素材内容为空", layer="heuristic", details={},
-            )
-        return SafetyResult(
-            passed=True, risk_score=0.0, category="",
-            reason="", layer="pass", details={},
-        )
+    if content_type == "text":
+        # 文本：关键词 → 启发式 → LLM（可选）
+        result = _layer1_keyword(content)
+        if result:
+            return result
 
-    # 层 1 关键词
-    result = _layer1_keyword(content)
-    if result:
-        return result
+        result = _layer2_heuristic(content)
+        if result:
+            return result
 
-    # 层 2 启发式
-    result = _layer2_heuristic(content)
-    if result:
-        return result
+        result = await _layer3_llm(content)
+        if result:
+            return result
 
-    # 层 3 LLM（可选）
-    result = await _layer3_llm(content)
-    if result:
-        return result
+    else:
+        # 媒体（image / audio / video）：
+        # 层A：媒体格式启发式检查（长度、MIME 一致性、base64 合法性）
+        result = _layer_media_heuristic(content, content_type)
+        if result:
+            return result
+
+        # 层B：图像 NSFW LLM 审核（仅 image，按配置开启）
+        result = await _layer_media_llm(content, content_type)
+        if result:
+            return result
+
+        # 层C：对媒体素材中携带的文本描述（metadata.description）做关键词检测
+        # 注意：这里 content 是 base64，无法直接做文本检查
+        # 文本部分在 ingest 端点的 metadata 里，此处留钩子供后续扩展
 
     return SafetyResult(
         passed=True, risk_score=0.0, category="",

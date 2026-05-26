@@ -44,7 +44,7 @@ _settings = get_settings()
 _pipeline    = DatasetProductionPipeline()
 _version_mgr = DatasetVersionManager()
 _review_queue = HumanReviewQueue()
-_ledger      = CreatorLedger(_settings.creator_ledger_path)
+_ledger      = CreatorLedger(_settings.creator_ledger_json_path)
 _revenue_calc = RevenueCalculator()
 
 
@@ -237,7 +237,7 @@ async def get_package(package_id: str):
 
 @dataset_router.post("/api/dataset/sell", summary="记录销售 & 触发分润")
 async def sell_dataset(req: SellRequest):
-    """记录企业客户购买 → 触发创作者分润计算 → 写入账本。"""
+    """记录企业客户购买 → 触发创作者分润计算 → 写入账本 → 写入购买记录（下载鉴权依据）。"""
     pkg = storage.get_package_db(req.package_id)
     if not pkg:
         raise HTTPException(404, f"数据集包 {req.package_id} 不存在")
@@ -251,8 +251,13 @@ async def sell_dataset(req: SellRequest):
     records = _revenue_calc.calculate(pkg_obj, req.price_cny, buyer_id=req.buyer_id)
     _ledger.add_records(records)
 
+    # 写入购买记录，供 /api/dataset/download/{package_id} 鉴权使用
+    sale_id = str(uuid.uuid4())
+    from store.db import record_purchase as _record_purchase
+    _record_purchase(sale_id, req.package_id, req.buyer_id, req.price_cny)
+
     return {
-        "sale_id":    str(uuid.uuid4()),
+        "sale_id":    sale_id,
         "package_id": req.package_id,
         "buyer_id":   req.buyer_id,
         "price_cny":  req.price_cny,
@@ -266,6 +271,108 @@ async def sell_dataset(req: SellRequest):
         ],
         "sold_at": datetime.utcnow().isoformat(),
     }
+
+
+# ════════════════════════════════════════════════════════════════════
+# 买家下载端点
+# ════════════════════════════════════════════════════════════════════
+
+class DownloadRequest(BaseModel):
+    buyer_id: str = Field(..., description="买家 ID，需与购买时一致")
+    file_type: str = Field("zip", description="zip | jsonl | parquet")
+
+
+@dataset_router.post("/api/dataset/download/{package_id}", summary="买家下载已购数据集")
+async def download_dataset(
+    package_id: str,
+    req: DownloadRequest,
+):
+    """
+    验证买家已购买后，返回对应格式的文件流。
+
+    file_type:
+      zip     — 完整 ZIP 包（JSONL + Parquet + DataCard）
+      jsonl   — 仅 JSONL 文件
+      parquet — 仅 Parquet 文件（若存在）
+    """
+    from store.db import check_purchase as _check_purchase, increment_download as _incr_dl
+    from fastapi.responses import FileResponse
+
+    # ── 鉴权：检查购买记录 ──────────────────────────────────────────
+    if not _check_purchase(req.buyer_id, package_id):
+        raise HTTPException(
+            403,
+            detail={
+                "error":   "未购买",
+                "message": f"buyer_id={req.buyer_id!r} 尚未购买数据集包 {package_id}，"
+                           "请先调用 /api/dataset/sell 完成购买。",
+            },
+        )
+
+    # ── 获取包信息（export_paths）──────────────────────────────────
+    pkg = storage.get_package_db(package_id)
+    if not pkg:
+        raise HTTPException(404, f"数据集包 {package_id} 不存在")
+
+    export_paths: dict = pkg.get("export_paths", {})
+    if isinstance(export_paths, str):
+        try:
+            import json as _json_ep
+            export_paths = _json_ep.loads(export_paths)
+        except Exception:
+            export_paths = {}
+
+    # ── 按 file_type 选择文件路径 ───────────────────────────────────
+    file_type = req.file_type.lower().strip(".")
+    path_map = {
+        "zip":     export_paths.get("zip"),
+        "jsonl":   export_paths.get("jsonl"),
+        "parquet": export_paths.get("parquet"),
+    }
+    file_path = path_map.get(file_type)
+
+    if not file_path:
+        available = [k for k, v in path_map.items() if v]
+        raise HTTPException(
+            404,
+            detail={
+                "error":     "文件类型不存在",
+                "requested": file_type,
+                "available": available,
+                "message":   f"该数据集包暂无 {file_type} 格式，可用格式: {available}",
+            },
+        )
+
+    if not os.path.exists(file_path):
+        raise HTTPException(
+            410,
+            detail={
+                "error":   "文件已删除",
+                "message": "数据集文件已从磁盘删除，请联系平台管理员重新生成。",
+            },
+        )
+
+    # ── 递增下载计数 ────────────────────────────────────────────────
+    _incr_dl(req.buyer_id, package_id)
+
+    # ── 返回文件流 ──────────────────────────────────────────────────
+    media_types = {
+        "zip":     "application/zip",
+        "jsonl":   "application/x-ndjson",
+        "parquet": "application/octet-stream",
+    }
+    filename = os.path.basename(file_path)
+
+    return FileResponse(
+        path=file_path,
+        media_type=media_types.get(file_type, "application/octet-stream"),
+        filename=filename,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Package-Id":        package_id,
+            "X-Buyer-Id":          req.buyer_id,
+        },
+    )
 
 
 # ════════════════════════════════════════════════════════════════════

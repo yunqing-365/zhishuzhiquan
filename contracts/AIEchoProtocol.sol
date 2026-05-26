@@ -26,9 +26,18 @@ pragma solidity ^0.8.20;
  *     • ambient_sfx     alpha=14  游戏音效
  *     • general(audio)  alpha=25  兜底
  *
- *   [★ 新增] 三模态 Asset.modality 支持 "text" / "image" / "audio"
+ *   [★ v6 新增] 视频细粒度场景 AMM 配置（与 scoring.py 完全对齐）
+ *     • documentary    alpha=36  纪录片/采访/庭审，极高语义密度
+ *     • lecture        alpha=30  教学/演讲，TTS & 知识蒸馏
+ *     • cinematic      alpha=26  影视级制作，LoRA/T2V 训练
+ *     • sports_action  alpha=18  运动/动作，时序建模
+ *     • vlog           alpha=12  个人 vlog，质量参差
+ *     • Asset.videoScene 字段存储细粒度标签，AMM 优先使用 videoScene
+ *
+ *   [★ v6 新增] 四模态 Asset.modality 支持 "text" / "image" / "audio" / "video"
  *     • Audio 资产额外存储 audioScene 字段（细粒度标签）
- *     • 不同 audioScene 使用不同 AMM alpha，与 scoring.py 完全对齐
+ *     • Video 资产额外存储 videoScene 字段（细粒度标签）
+ *     • AMM effectiveDomain 优先级：videoScene > audioScene > domainKey
  *
  *   [保留] v3 防洗稿：getHammingDistance + 汉明距离阈值检测
  *   [保留] v3 AMM 联合曲线：getDynamicPrice / purchaseAndCallData
@@ -60,6 +69,7 @@ contract AIEchoProtocol {
         string        modality;      // "text" | "image" | "audio" | "video"
         string        domainKey;     // TEV 场景 (medical_sft / illustration / general …)
         string        audioScene;    // 音频细粒度场景 (仅 audio 模态；其他为 "")
+        string        videoScene;    // ★ v6: 视频细粒度场景 (仅 video 模态；其他为 "")
         uint256       baseValue;
         HashAlgorithm hashAlgo;
         uint256       timestamp;
@@ -165,6 +175,14 @@ contract AIEchoProtocol {
 
         // noise 熔断：alpha=0，不上市场（isActive=false 防止误入）
         domainRegistry["noise"]          = DomainConfig({alpha:  0, isActive: false});
+
+        // ── 视频场景（★ v6: 与 scoring.py AMM_SCENE_CONFIG 完全对齐）──
+        // alpha 比同档音频略低（视频稀缺但需求方尚未充分教育）
+        domainRegistry["documentary"]   = DomainConfig({alpha: 36, isActive: true});  // 纪录片/采访/庭审
+        domainRegistry["lecture"]        = DomainConfig({alpha: 30, isActive: true});  // 教学/演讲
+        domainRegistry["cinematic"]      = DomainConfig({alpha: 26, isActive: true});  // 影视级制作
+        domainRegistry["sports_action"]  = DomainConfig({alpha: 18, isActive: true});  // 运动/动作
+        domainRegistry["vlog"]           = DomainConfig({alpha: 12, isActive: true});  // 个人 vlog
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -183,13 +201,14 @@ contract AIEchoProtocol {
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // 7. 资产注册与确权（★ v5: 支持 audio + audioScene + hashAlgo）
+    // 7. 资产注册与确权（★ v6: 支持 video + videoScene）
     // ═══════════════════════════════════════════════════════════════
     function registerAsset(
         uint256       _assetHash,
         string memory _modality,
         string memory _domainKey,
         string memory _audioScene,   // 非音频传 ""
+        string memory _videoScene,   // ★ v6: 非视频传 ""
         uint256       _baseValue,
         uint8         _hashAlgo,     // 0=SIMHASH 1=PHASH 2=AFP
         bytes32       _zkCommitment  // ★ Stage 2: ZK 承诺（可传 bytes32(0) 跳过）
@@ -221,11 +240,12 @@ contract AIEchoProtocol {
             modality:      _modality,
             domainKey:     _domainKey,
             audioScene:    _audioScene,
+            videoScene:    _videoScene,   // ★ v6
             baseValue:     _baseValue,
             hashAlgo:      algo,
             timestamp:     block.timestamp,
-            paywallActive: true,          // 默认激活 Paywall 保护
-            zkCommitment:  _zkCommitment  // ★ Stage 2: 绑定 ZK 承诺
+            paywallActive: true,
+            zkCommitment:  _zkCommitment
         });
         registeredHashes.push(_assetHash);
 
@@ -304,11 +324,16 @@ contract AIEchoProtocol {
         Asset memory targetAsset = assetRegistry[_assetHash];
         require(targetAsset.creator != address(0), "数据未确权");
 
-        // 音频资产：优先使用 audioScene 的 AMM 配置
+        // 多模态细粒度 AMM 场景选取：
+        //   视频资产 → videoScene（如 documentary / lecture / cinematic…）
+        //   音频资产 → audioScene（如 speech_medical / music_original…）
+        //   其他     → domainKey（如 medical_sft / illustration…）
         string memory effectiveDomain = (
-            bytes(targetAsset.audioScene).length > 0
-                ? targetAsset.audioScene
-                : targetAsset.domainKey
+            bytes(targetAsset.videoScene).length > 0
+                ? targetAsset.videoScene
+                : bytes(targetAsset.audioScene).length > 0
+                    ? targetAsset.audioScene
+                    : targetAsset.domainKey
         );
 
         uint256 currentPrice = getDynamicPrice(effectiveDomain, targetAsset.baseValue);

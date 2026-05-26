@@ -32,13 +32,13 @@ try:
     _API_KEY   = _settings.openai_api_key
     _BASE_URL  = _settings.openai_base_url
     _MODEL     = _settings.openai_model
+    # 副模型：优先用配置中显式设置的，为空则回退到主模型
+    _MODEL_B   = _settings.openai_model_b or _settings.openai_model
 except Exception:
     _API_KEY   = os.environ.get("OPENAI_API_KEY", "")
     _BASE_URL  = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
     _MODEL     = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-
-# ── 副模型（可配置，默认与主模型相同走不同 temperature）──────────
-_MODEL_B = os.environ.get("OPENAI_MODEL_B", _MODEL)
+    _MODEL_B   = os.environ.get("OPENAI_MODEL_B", _MODEL)
 
 _LLM_ENABLED = bool(_API_KEY)
 
@@ -290,8 +290,15 @@ class MultiModelAnnotator:
       - 否则取主模型结果
       - 主模型也失败 → 规则生成
 
-    _MODEL_B 默认与主模型相同，但 temperature 不同，
-    也可设置 OPENAI_MODEL_B 环境变量指向另一个模型。
+    【真正的多模型投票】：
+      在 .env 中设置 OPENAI_MODEL_B 为不同厂商/架构的模型，例如：
+        OPENAI_MODEL=gpt-4o-mini          (OpenAI)
+        OPENAI_MODEL_B=deepseek-chat      (DeepSeek, 同时配 OPENAI_BASE_URL_B)
+      不同来源模型的分歧比同模型不同 temperature 更能提升标注可信度。
+
+    当前状态：
+      若 OPENAI_MODEL_B 未设置，_MODEL_B == _MODEL（仅 temperature 不同），
+      这是伪多模型投票，可信度提升有限。配置不同的真实副模型可显著改善。
     """
 
     def __init__(self, mode: AnnotationMode = AnnotationMode.AUTO_REVIEW):

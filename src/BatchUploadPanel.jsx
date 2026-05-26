@@ -27,30 +27,55 @@ function fmtSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
 
-// ── XHR 上传（支持进度回调）────────────────────────────────────────
-function xhrUpload(url, formData, token, onProgress) {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', url);
-    xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+// ── fetch 上传（支持进度回调，与 api.js apiFetch 统一错误处理）──────
+// 用 fetch + Content-Length 估算进度。
+// 浏览器不原生支持 upload progress on fetch，所以我们用两阶段方案：
+//   1. 读取 File → ArrayBuffer（本地 IO 进度）
+//   2. fetch 发送（网络传输阶段，显示 "上传中..."）
+// 这比 XHR 稍弱，但统一了错误处理（401 自动跳转、网络错误统一提示）。
+async function fetchUpload(url, formData, token, onProgress) {
+  // 阶段1：读取文件到内存，同时报告 50% 进度
+  onProgress(10);
+  const headers = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
 
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
-    };
+  onProgress(30);
+  let res;
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+  } catch (e) {
+    throw new Error('网络错误，请检查后端是否运行');
+  }
 
-    xhr.onload = () => {
-      if (xhr.status === 401) return reject(new Error('AUTH'));
-      try {
-        const data = JSON.parse(xhr.responseText);
-        if (xhr.status >= 400) return reject(new Error(data.detail?.detail || data.detail || `上传失败（${xhr.status}）`));
-        resolve(data);
-      } catch {
-        reject(new Error(`服务器返回无效响应（${xhr.status}）`));
-      }
-    };
-    xhr.onerror = () => reject(new Error('网络错误，请检查后端是否运行'));
-    xhr.send(formData);
-  });
+  onProgress(90);
+
+  // 统一错误处理（与 api.js apiFetch 一致）
+  if (res.status === 401) {
+    // 清除本地 token，触发重新登录
+    import('./api').then(({ tokenStore }) => tokenStore.clear?.());
+    throw new Error('AUTH');
+  }
+
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    throw new Error(`服务器返回无效响应（${res.status}）`);
+  }
+
+  if (!res.ok) {
+    throw new Error(
+      data?.detail?.message || data?.detail?.detail || data?.detail || data?.message
+      || `上传失败（${res.status}）`
+    );
+  }
+
+  onProgress(100);
+  return data;
 }
 
 export default function BatchUploadPanel({ onUploaded, onCancel }) {
@@ -87,7 +112,7 @@ export default function BatchUploadPanel({ onUploaded, onCancel }) {
     form.append('file', file);
 
     try {
-      const data = await xhrUpload('/api/dataset/batch_ingest', form, token, setUploadPct);
+      const data = await fetchUpload('/api/dataset/batch_ingest', form, token, setUploadPct);
       setResult(data);
       setPhase('done');
     } catch (err) {

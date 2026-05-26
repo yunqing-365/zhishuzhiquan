@@ -39,14 +39,13 @@ except ImportError:
     print("!! [auth] passlib 未安装，请执行: pip install passlib[bcrypt]")
 
 import storage  # 同目录
+from config import get_settings as _get_settings
 
-# ── JWT 配置 ────────────────────────────────────────────────────────
-_SECRET_KEY = os.environ.get(
-    "JWT_SECRET_KEY",
-    "zhishuzhiquan-dev-secret-please-change-in-production-2024"
-)
-_ALGORITHM   = "HS256"
-_EXPIRE_DAYS = int(os.environ.get("JWT_EXPIRE_DAYS", "30"))
+# ── JWT 配置（统一从 config.Settings 读取）────────────────────────
+_cfg         = _get_settings()
+_SECRET_KEY  = _cfg.jwt_secret_key
+_ALGORITHM   = _cfg.jwt_algorithm
+_EXPIRE_DAYS = _cfg.jwt_expire_days
 
 auth_router  = APIRouter(tags=["创作者认证"])
 _bearer      = HTTPBearer(auto_error=False)

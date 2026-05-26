@@ -13,7 +13,14 @@ services:
       # 后端监听地址
       BACKEND_HOST: "0.0.0.0"
       BACKEND_PORT: "8000"
-      # 可选：API Key 鉴权（留空则关闭）
+      # LLM 推理密钥（从宿主机 .env 注入）
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o-mini}"
+      # JWT 认证密钥（生产必须设置强随机值）
+      JWT_SECRET_KEY: "${JWT_SECRET_KEY}"
+      JWT_EXPIRE_DAYS: "${JWT_EXPIRE_DAYS:-30}"
+      # 可选：B2B API Key 鉴权（留空则关闭）
       API_KEY: "${API_KEY:-}"
     volumes:
       # 持久化 ChromaDB 向量库 + SQLite 历史记录

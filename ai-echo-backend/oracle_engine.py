@@ -558,13 +558,83 @@ async def health():
     stub_adapters = [k for k, v in _registry.items() if getattr(v.adapter, "IS_STUB", False)]
     return {
         "status":          "ok",
-        "version":         "v5",
+        "version":         "v6",
         "adapters":        list(_registry.keys()),
-        "stub_adapters":   stub_adapters,          # 降级适配器列表（前端可以展示提示）
-        "corpus_size":     _collection.count(),    # ChromaDB 向量库规模
-        "db_stats":        stats,                  # SQLite 统计
+        "stub_adapters":   stub_adapters,
+        "corpus_size":     _collection.count(),
+        "db_stats":        stats,
         "chroma_path":     CHROMA_PATH,
     }
+
+
+@app.get("/metrics", summary="Prometheus 指标端点")
+async def prometheus_metrics():
+    """
+    暴露 Prometheus 格式的指标，供 Grafana / Alertmanager 抓取。
+
+    指标来源：
+      - PipelineMonitor 快照（流水线吞吐量、质量分布、告警数）
+      - SQLite 样本统计（sft_samples / dpo_samples / packages）
+      - ChromaDB 向量库规模
+
+    部署：在 prometheus.yml 的 scrape_configs 中添加：
+        - job_name: 'zhishuzhiquan'
+          static_configs:
+            - targets: ['localhost:8000']
+    """
+    from fastapi.responses import PlainTextResponse
+    from dataset.pipeline_monitor import PipelineMonitor
+
+    monitor  = PipelineMonitor.instance()
+    snapshot = monitor.get_snapshot()
+    db_stats = get_stats()
+
+    # ── 构建 Prometheus 文本格式 ─────────────────────────────────────
+    lines: list[str] = []
+
+    def _gauge(name: str, value, labels: dict | None = None, help_text: str = ""):
+        if help_text:
+            lines.append(f"# HELP {name} {help_text}")
+            lines.append(f"# TYPE {name} gauge")
+        label_str = ""
+        if labels:
+            kv = ",".join(f'{k}="{v}"' for k, v in labels.items())
+            label_str = f"{{{kv}}}"
+        lines.append(f"{name}{label_str} {value}")
+
+    # 样本统计
+    _gauge("zszq_sft_samples_total",     db_stats.get("sft_samples", 0),     help_text="SFT 样本总数")
+    _gauge("zszq_dpo_samples_total",     db_stats.get("dpo_samples", 0),     help_text="DPO 样本总数")
+    _gauge("zszq_pretrain_chunks_total", db_stats.get("pretrain_chunks", 0), help_text="预训练语料块总数")
+    _gauge("zszq_packages_total",        db_stats.get("packages", 0),        help_text="数据集包总数")
+    _gauge("zszq_corpus_vectors_total",  _collection.count(),                help_text="ChromaDB 向量库规模")
+
+    # 流水线告警
+    _gauge("zszq_pipeline_alerts_unresolved", snapshot.get("alert_count", 0), help_text="未解决的流水线告警数")
+
+    # 各 job 质量均分（最近 20 个 job）
+    lines.append("# HELP zszq_job_avg_quality 流水线 job 平均质量分")
+    lines.append("# TYPE zszq_job_avg_quality gauge")
+    for job in snapshot.get("jobs", []):
+        lines.append(
+            f'zszq_job_avg_quality{{job_id="{job["job_id"][:8]}"}} {job["avg_quality"]}'
+        )
+
+    # 各 job 吞吐率（output / input）
+    lines.append("# HELP zszq_job_pass_rate 流水线 job 通过率（output/input）")
+    lines.append("# TYPE zszq_job_pass_rate gauge")
+    for job in snapshot.get("jobs", []):
+        total_in  = job.get("total_input", 0)
+        total_out = job.get("total_output", 0)
+        rate = round(total_out / total_in, 4) if total_in > 0 else 0.0
+        lines.append(
+            f'zszq_job_pass_rate{{job_id="{job["job_id"][:8]}"}} {rate}'
+        )
+
+    return PlainTextResponse(
+        content="\n".join(lines) + "\n",
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 @app.get("/api/history")
