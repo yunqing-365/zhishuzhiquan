@@ -17,6 +17,9 @@ services:
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
       OPENAI_BASE_URL: "${OPENAI_BASE_URL:-https://api.openai.com/v1}"
       OPENAI_MODEL: "${OPENAI_MODEL:-gpt-4o-mini}"
+      # 副模型（多厂商投票）：留空则与主模型相同
+      OPENAI_MODEL_B: "${OPENAI_MODEL_B:-}"
+      OPENAI_BASE_URL_B: "${OPENAI_BASE_URL_B:-}"
       # JWT 认证密钥（生产必须设置强随机值）
       JWT_SECRET_KEY: "${JWT_SECRET_KEY}"
       JWT_EXPIRE_DAYS: "${JWT_EXPIRE_DAYS:-30}"

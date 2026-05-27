@@ -171,8 +171,16 @@ class RegisterRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def password_valid(cls, v: str) -> str:
-        if len(v) < 6:
-            raise ValueError("密码至少 6 位")
+        if len(v) < 8:
+            raise ValueError("密码至少 8 位")
+        if len(v) > 128:
+            raise ValueError("密码最多 128 位")
+        has_upper  = any(c.isupper() for c in v)
+        has_digit  = any(c.isdigit() for c in v)
+        has_symbol = any(not c.isalnum() for c in v)
+        complexity = sum([has_upper, has_digit, has_symbol])
+        if complexity < 2:
+            raise ValueError("密码需包含大写字母、数字、符号中的至少两种")
         return v
 
 

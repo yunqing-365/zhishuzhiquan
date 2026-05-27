@@ -413,6 +413,41 @@ class DatasetProductionPipeline:
             # P1: 包元数据持久化
             async with _db_write_lock:
                 import store.db as _db
+
+                # ── 回填 package_id 到样本对象，再持久化 ────────────────
+                # 样本在 Stage 2 写入时 package_id 尚为空；
+                # 打包完成后得到确定的 package_id，需更新 SQLite
+                pid = package.package_id
+                if pid:
+                    for s in deduped_sft:
+                        s.package_id = pid
+                    for s in deduped_dpo:
+                        s.package_id = pid
+                    # 用 UPDATE 补写已入库的样本（INSERT OR IGNORE 不会重写）
+                    def _backfill_pkg_id():
+                        with _db._lock:
+                            conn = _db._get_conn()
+                            try:
+                                sft_ids = [(pid, s.sample_id) for s in deduped_sft]
+                                dpo_ids = [(pid, s.sample_id) for s in deduped_dpo]
+                                if sft_ids:
+                                    conn.executemany(
+                                        "UPDATE sft_samples SET package_id=? WHERE sample_id=?",
+                                        sft_ids,
+                                    )
+                                if dpo_ids:
+                                    conn.executemany(
+                                        "UPDATE dpo_samples SET package_id=? WHERE sample_id=?",
+                                        dpo_ids,
+                                    )
+                                conn.commit()
+                            finally:
+                                conn.close()
+
+                    import asyncio as _aio
+                    await _aio.get_event_loop().run_in_executor(None, _backfill_pkg_id)
+                    print(f"  ✅ package_id 已回填至 {len(deduped_sft)} SFT + {len(deduped_dpo)} DPO 样本")
+
                 await _db.save_package(package)
                 print(f"  ✅ 包元数据已写入 SQLite (id={package.package_id[:8]}…)")
 

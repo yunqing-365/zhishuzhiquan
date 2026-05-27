@@ -42,14 +42,47 @@ pragma solidity ^0.8.20;
  *   [保留] v3 防洗稿：getHammingDistance + 汉明距离阈值检测
  *   [保留] v3 AMM 联合曲线：getDynamicPrice / purchaseAndCallData
  *   [保留] v3 分账逻辑：创作者 / 平台 / 生态基金三路清算
+ *
+ *   [★ v6.1 安全修复] ReentrancyGuard + CEI 模式
+ *     • 内联 ReentrancyGuard（无需 OpenZeppelin 依赖）
+ *     • purchaseAndCallData 改为 CEI 顺序：先更新所有状态，再 transfer
+ *     • 防止恶意创作者合约在 transfer 回调中重入 purchaseAndCallData
  */
 contract AIEchoProtocol {
+
+    // ── 内联 ReentrancyGuard ──────────────────────────────────────
+    uint256 private _reentrancyStatus;
+    uint256 private constant _NOT_ENTERED = 1;
+    uint256 private constant _ENTERED     = 2;
+
+    modifier nonReentrant() {
+        require(_reentrancyStatus != _ENTERED, "ReentrancyGuard: reentrant call");
+        _reentrancyStatus = _ENTERED;
+        _;
+        _reentrancyStatus = _NOT_ENTERED;
+    }
 
     // ═══════════════════════════════════════════════════════════════
     // 基础角色
     // ═══════════════════════════════════════════════════════════════
     address public platformAdmin;
     address public ecosystemFund;
+
+    // ── 紧急暂停开关（默认关闭） ─────────────────────────────────────
+    bool public paused;
+
+    modifier onlyAdmin() {
+        require(msg.sender == platformAdmin, "仅平台管理员可操作");
+        _;
+    }
+
+    modifier whenNotPaused() {
+        require(!paused, "合约已暂停：紧急维护中，请稍后重试");
+        _;
+    }
+
+    event ContractPaused(address indexed by, uint256 at);
+    event ContractUnpaused(address indexed by, uint256 at);
 
     // ═══════════════════════════════════════════════════════════════
     // 1. 多模态哈希算法标记
@@ -148,8 +181,9 @@ contract AIEchoProtocol {
     // 构造器：初始化所有场景 AMM 配置
     // ═══════════════════════════════════════════════════════════════
     constructor(address _platformNode, address _ecosystemFund) {
-        platformAdmin = _platformNode;
-        ecosystemFund = _ecosystemFund;
+        platformAdmin     = _platformNode;
+        ecosystemFund     = _ecosystemFund;
+        _reentrancyStatus = _NOT_ENTERED;   // ReentrancyGuard 初始化
 
         // ── 文本场景 ──────────────────────────────────────────────
         domainRegistry["medical_sft"]  = DomainConfig({alpha: 32, isActive: true});
@@ -212,8 +246,7 @@ contract AIEchoProtocol {
         uint256       _baseValue,
         uint8         _hashAlgo,     // 0=SIMHASH 1=PHASH 2=AFP
         bytes32       _zkCommitment  // ★ Stage 2: ZK 承诺（可传 bytes32(0) 跳过）
-    ) public {
-        require(domainRegistry[_domainKey].isActive, "该垂直领域尚未开放或已熔断");
+    ) public whenNotPaused {
         require(_baseValue > 0,                       "低质量垃圾数据触发熔断，拒绝上链");
         require(_hashAlgo <= 2,                       "未知哈希算法类型");
 
@@ -320,7 +353,7 @@ contract AIEchoProtocol {
         uint256 _creatorRatio,
         uint256 _callQuota,
         uint256 _ttlDays
-    ) public payable {
+    ) public payable nonReentrant whenNotPaused {
         Asset memory targetAsset = assetRegistry[_assetHash];
         require(targetAsset.creator != address(0), "数据未确权");
 
@@ -341,10 +374,14 @@ contract AIEchoProtocol {
         require(_callQuota > 0,            "调用配额不能为 0");
         require(_ttlDays > 0 && _ttlDays <= 365, "凭证有效期须在 1-365 天");
 
+        // ══ CEI 模式：先完成所有状态变更，再做外部转账 ══════════════
+        // CHECKS 已在上方 require 完成
+
+        // EFFECTS — 更新所有合约状态
         // ── 需求量上升，联合曲线右移
         domainDemandLedger[effectiveDomain] += 1;
 
-        // ── 颁发访问凭证（★ 新增）
+        // ── 颁发访问凭证
         uint256 expiresAt = block.timestamp + (_ttlDays * 1 days);
         accessTokens[_assetHash][msg.sender] = AccessToken({
             callerAddr:     msg.sender,
@@ -353,17 +390,25 @@ contract AIEchoProtocol {
             callsUsed:      0,
             revoked:        false
         });
-        emit AccessGranted(_assetHash, msg.sender, expiresAt, _callQuota);
 
-        // ── 三路分账清算
+        // ── 计算分账金额（状态读取，不触发外部调用）
         uint256 creatorAmount  = (msg.value * _creatorRatio) / 1000;
         uint256 remaining      = msg.value - creatorAmount;
         uint256 platformAmount = (remaining * 60) / 100;
         uint256 fundAmount     = remaining - platformAmount;
 
-        payable(targetAsset.creator).transfer(creatorAmount);
-        payable(platformAdmin).transfer(platformAmount);
-        payable(ecosystemFund).transfer(fundAmount);
+        // ── 记录受益人地址（避免 storage 读取在 transfer 后）
+        address creator  = targetAsset.creator;
+        address platform = platformAdmin;
+        address fund     = ecosystemFund;
+
+        // INTERACTIONS — 最后执行外部转账（此时状态已定格，重入无效）
+        emit AccessGranted(_assetHash, msg.sender, expiresAt, _callQuota);
+
+        (bool okCreator,)  = payable(creator).call{value: creatorAmount}("");
+        (bool okPlatform,) = payable(platform).call{value: platformAmount}("");
+        (bool okFund,)     = payable(fund).call{value: fundAmount}("");
+        require(okCreator && okPlatform && okFund, "分账转账失败");
 
         uint256 newPrice = getDynamicPrice(effectiveDomain, targetAsset.baseValue);
         emit PaymentSettled(_assetHash, msg.value, creatorAmount);
@@ -416,5 +461,49 @@ contract AIEchoProtocol {
         if (algo == HashAlgorithm.SIMHASH) return "SimHash-64bit";
         if (algo == HashAlgorithm.PHASH)   return "DCT-pHash-64bit";
         return "AFP-SHA256-48bit";
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // 14. ★ 紧急暂停 / 恢复（v6.1 新增）
+    // ═══════════════════════════════════════════════════════════════
+
+    /**
+     * @notice 紧急暂停合约（仅平台管理员）
+     * 暂停后 registerAsset 和 purchaseAndCallData 均不可调用。
+     * 查询函数（只读）不受影响，买家仍可查看资产信息。
+     */
+    function pause() external onlyAdmin {
+        require(!paused, "合约已处于暂停状态");
+        paused = true;
+        emit ContractPaused(msg.sender, block.timestamp);
+    }
+
+    /**
+     * @notice 恢复合约运行（仅平台管理员）
+     */
+    function unpause() external onlyAdmin {
+        require(paused, "合约未处于暂停状态");
+        paused = false;
+        emit ContractUnpaused(msg.sender, block.timestamp);
+    }
+
+    /**
+     * @notice 转移平台管理员权限（两步交接：需新管理员主动 acceptAdmin）
+     */
+    address public pendingAdmin;
+    event AdminTransferInitiated(address indexed from, address indexed to);
+    event AdminTransferCompleted(address indexed newAdmin);
+
+    function transferAdmin(address _newAdmin) external onlyAdmin {
+        require(_newAdmin != address(0), "新管理员地址不能为零地址");
+        pendingAdmin = _newAdmin;
+        emit AdminTransferInitiated(msg.sender, _newAdmin);
+    }
+
+    function acceptAdmin() external {
+        require(msg.sender == pendingAdmin, "仅待接收管理员可确认");
+        platformAdmin = pendingAdmin;
+        pendingAdmin  = address(0);
+        emit AdminTransferCompleted(msg.sender);
     }
 }

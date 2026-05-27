@@ -24,7 +24,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ── 数据集子系统 ────────────────────────────────────────────────────
 from dataset.schema import CreatorMaterial, DatasetType, QualityTier
@@ -67,9 +67,18 @@ class ProduceRequest(BaseModel):
     license_type:  str   = "enterprise_internal"
 
 class SellRequest(BaseModel):
-    package_id: str
-    buyer_id:   str
-    price_cny:  float
+    package_id: str   = Field(..., min_length=1, max_length=128)
+    buyer_id:   str   = Field(..., min_length=1, max_length=128)
+    price_cny:  float = Field(..., ge=0, le=1_000_000,
+                              description="成交价格（人民币），0 表示免费，上限 100 万元")
+
+    @field_validator("price_cny")
+    @classmethod
+    def price_non_negative_and_finite(cls, v: float) -> float:
+        import math
+        if not math.isfinite(v):
+            raise ValueError("价格必须是有限数值")
+        return round(v, 2)   # 精确到分
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -236,11 +245,37 @@ async def get_package(package_id: str):
 
 
 @dataset_router.post("/api/dataset/sell", summary="记录销售 & 触发分润")
-async def sell_dataset(req: SellRequest):
-    """记录企业客户购买 → 触发创作者分润计算 → 写入账本 → 写入购买记录（下载鉴权依据）。"""
+async def sell_dataset(
+    req:     SellRequest,
+    caller:  Optional[dict] = Depends(get_optional_creator),
+):
+    """
+    记录企业客户购买 → 触发创作者分润计算 → 写入账本 → 写入购买记录。
+
+    安全策略：
+    - 携带有效 JWT 时，buyer_id 自动锁定为登录用户的 creator_id（防止伪造他人 buyer_id）
+    - price_cny 不能超过包定价的 2 倍（防止虚假高价刷分润）
+    - price_cny 不能为负数、无穷、NaN（已在 SellRequest validator 拦截）
+    - 未登录调用仍允许（支持匿名 B2B 采购），但 buyer_id 不做锁定
+    """
     pkg = storage.get_package_db(req.package_id)
     if not pkg:
         raise HTTPException(404, f"数据集包 {req.package_id} 不存在")
+
+    # ── 登录用户：buyer_id 锁定为自身，防止伪造 ────────────────────
+    if caller:
+        req = req.model_copy(update={"buyer_id": caller["creator_id"]})
+
+    # ── 价格合理性校验：不超过包定价的 2 倍（允许溢价谈判，防恶意刷高）
+    pkg_price: float = pkg.get("price_cny") or 0.0
+    if pkg_price > 0 and req.price_cny > pkg_price * 2:
+        raise HTTPException(
+            422,
+            detail={
+                "error":   "价格异常",
+                "message": f"传入价格 ¥{req.price_cny} 超过包定价 ¥{pkg_price} 的 2 倍上限",
+            },
+        )
 
     from dataset.schema import DatasetPackage
     pkg_obj = DatasetPackage(
@@ -727,3 +762,155 @@ async def version_diff(
 ):
     """对比两个版本：样本增减、质量变化"""
     return _vm.diff(from_id, to_id)
+
+
+# ════════════════════════════════════════════════════════════════════
+# P3 新增：企业买家市场端点
+# 与创作者视图（/api/dataset/packages）不同，市场端点面向买家开放：
+#   • 无需登录（公开浏览）
+#   • 支持关键词搜索、领域/类型/价格/质量多维筛选
+#   • 支持样本预览（返回 3 条脱敏示例）
+#   • 支持采购记录查询
+# ════════════════════════════════════════════════════════════════════
+
+@dataset_router.get("/api/market/packages", summary="【市场】公开数据集列表（买家浏览）")
+async def market_list_packages(
+    q:           Optional[str]   = Query(None,  description="关键词搜索（名称/领域）"),
+    domain:      Optional[str]   = Query(None,  description="领域过滤"),
+    dataset_type:Optional[str]   = Query(None,  description="类型过滤：sft/dpo/pretrain"),
+    min_quality: Optional[float] = Query(None,  description="最低平均质量分"),
+    max_price:   Optional[float] = Query(None,  description="最高价格（CNY）"),
+    sort_by:     str             = Query("quality", description="排序字段：quality/price/samples/created"),
+    order:       str             = Query("desc",    description="排序方向：asc/desc"),
+    limit:       int             = Query(50, le=200),
+    offset:      int             = Query(0,  ge=0),
+):
+    """
+    企业买家公开浏览端点：无需鉴权，支持多维筛选与排序。
+    返回每个包的摘要信息（不含创作者个人信息，不含下载路径）。
+    """
+    all_pkgs = _store_db.list_packages(500)   # 取足够多再过滤
+
+    # ── 筛选 ──────────────────────────────────────────────────────
+    result = []
+    for p in all_pkgs:
+        if q:
+            kw = q.lower()
+            if not (kw in (p.get("name") or "").lower()
+                    or kw in (p.get("domain") or "").lower()
+                    or kw in (p.get("dataset_type") or "").lower()):
+                continue
+        if domain      and p.get("domain")        != domain:       continue
+        if dataset_type and p.get("dataset_type") != dataset_type: continue
+        if min_quality is not None and (p.get("avg_quality") or 0) < min_quality: continue
+        if max_price   is not None and (p.get("price_cny")   or 0) > max_price:   continue
+        # 只展示有样本的包
+        if not p.get("total_samples"): continue
+        result.append(p)
+
+    # ── 排序 ──────────────────────────────────────────────────────
+    sort_map = {
+        "quality": "avg_quality",
+        "price":   "price_cny",
+        "samples": "total_samples",
+        "created": "created_at",
+    }
+    sort_key = sort_map.get(sort_by, "avg_quality")
+    result.sort(
+        key=lambda x: (x.get(sort_key) or 0),
+        reverse=(order != "asc"),
+    )
+
+    total = len(result)
+    page  = result[offset: offset + limit]
+
+    # ── 脱敏处理：移除内部路径和创作者个人信息 ──────────────────────
+    def _sanitize(p):
+        safe = {k: v for k, v in p.items()
+                if k not in ("export_paths", "creator_id")}
+        # 贡献者只保留数量，不暴露用户ID
+        if "creator_contributions" in safe:
+            safe["contributor_count"] = len(safe.pop("creator_contributions", {}) or {})
+        return safe
+
+    return {
+        "total":    total,
+        "offset":   offset,
+        "limit":    limit,
+        "packages": [_sanitize(p) for p in page],
+    }
+
+
+@dataset_router.get("/api/market/package/{package_id}", summary="【市场】数据集详情 + 样本预览")
+async def market_package_detail(package_id: str):
+    """
+    买家查看数据集详情，附带 3 条脱敏样本预览（掩盖创作者ID，截断长文本）。
+    """
+    pkg = _store_db.get_package(package_id)
+    if not pkg:
+        raise HTTPException(404, "数据集不存在")
+
+    # 获取样本预览（最多 3 条）
+    preview_samples: list = []
+    try:
+        all_samples = _store_db.list_samples_by_package(package_id, limit=3)
+        for s in all_samples:
+            sample_preview = {}
+            # SFT 样本
+            if s.get("instruction"):
+                sample_preview["instruction"] = (s["instruction"] or "")[:120]
+            if s.get("output"):
+                sample_preview["output"] = (s["output"] or "")[:200]
+            # DPO 样本
+            if s.get("chosen"):
+                sample_preview["chosen"] = (s["chosen"] or "")[:200]
+            if s.get("rejected"):
+                sample_preview["rejected"] = (s["rejected"] or "")[:120]
+            if s.get("sample_type"):
+                sample_preview["sample_type"] = s["sample_type"]
+            if s.get("quality_score"):
+                sample_preview["quality_score"] = s["quality_score"]
+            preview_samples.append(sample_preview)
+    except Exception:
+        pass   # 预览失败不阻断详情返回
+
+    # 脱敏详情
+    detail = {k: v for k, v in pkg.items()
+              if k not in ("export_paths", "creator_id")}
+    if "creator_contributions" in detail:
+        detail["contributor_count"] = len(detail.pop("creator_contributions") or {})
+
+    return {**detail, "preview_samples": preview_samples}
+
+
+@dataset_router.get("/api/market/stats", summary="【市场】平台整体统计（买家首页）")
+async def market_stats():
+    """买家首页展示用：数据集总量、总样本数、领域分布、质量分布。"""
+    all_pkgs = _store_db.list_packages(1000)
+    active   = [p for p in all_pkgs if p.get("total_samples")]
+
+    domain_dist: dict = {}
+    type_dist:   dict = {}
+    quality_tiers = {"铂金(≥8.5)": 0, "黄金(≥7.0)": 0, "白银(≥5.0)": 0, "待审(<5.0)": 0}
+
+    total_samples = 0
+    for p in active:
+        d = p.get("domain") or "general"
+        t = p.get("dataset_type") or "unknown"
+        q = p.get("avg_quality") or 0
+        s = p.get("total_samples") or 0
+        domain_dist[d] = domain_dist.get(d, 0) + 1
+        type_dist[t]   = type_dist.get(t, 0) + 1
+        total_samples  += s
+        if q >= 8.5:  quality_tiers["铂金(≥8.5)"] += 1
+        elif q >= 7.0: quality_tiers["黄金(≥7.0)"] += 1
+        elif q >= 5.0: quality_tiers["白银(≥5.0)"] += 1
+        else:          quality_tiers["待审(<5.0)"]  += 1
+
+    return {
+        "total_packages":  len(active),
+        "total_samples":   total_samples,
+        "domain_dist":     domain_dist,
+        "type_dist":       type_dist,
+        "quality_tiers":   quality_tiers,
+    }

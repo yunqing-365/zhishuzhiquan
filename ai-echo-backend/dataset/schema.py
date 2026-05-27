@@ -61,6 +61,7 @@ class SFTSample:
     sample_id:       str   = field(default_factory=lambda: str(uuid.uuid4()))
     material_id:     str   = ""
     creator_id:      str   = ""
+    package_id:      str   = ""   # 所属数据集包 ID（打包后回填）
     instruction:     str   = ""
     input:           str   = ""
     output:          str   = ""
@@ -77,6 +78,7 @@ class DPOSample:
     sample_id:    str   = field(default_factory=lambda: str(uuid.uuid4()))
     material_id:  str   = ""
     creator_id:   str   = ""
+    package_id:   str   = ""   # 所属数据集包 ID（打包后回填）
     prompt:       str   = ""
     chosen:       str   = ""
     rejected:     str   = ""

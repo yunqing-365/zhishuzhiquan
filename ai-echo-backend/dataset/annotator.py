@@ -29,16 +29,19 @@ from dataset.schema import (
 try:
     from config import get_settings
     _settings = get_settings()
-    _API_KEY   = _settings.openai_api_key
-    _BASE_URL  = _settings.openai_base_url
-    _MODEL     = _settings.openai_model
+    _API_KEY    = _settings.openai_api_key
+    _BASE_URL   = _settings.openai_base_url
+    _MODEL      = _settings.openai_model
     # 副模型：优先用配置中显式设置的，为空则回退到主模型
-    _MODEL_B   = _settings.openai_model_b or _settings.openai_model
+    _MODEL_B    = _settings.openai_model_b or _settings.openai_model
+    # 副模型 Base URL：不同厂商时填写，留空则复用主模型 URL
+    _BASE_URL_B = _settings.openai_base_url_b or _settings.openai_base_url
 except Exception:
-    _API_KEY   = os.environ.get("OPENAI_API_KEY", "")
-    _BASE_URL  = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    _MODEL     = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-    _MODEL_B   = os.environ.get("OPENAI_MODEL_B", _MODEL)
+    _API_KEY    = os.environ.get("OPENAI_API_KEY", "")
+    _BASE_URL   = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    _MODEL      = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+    _MODEL_B    = os.environ.get("OPENAI_MODEL_B", _MODEL)
+    _BASE_URL_B = os.environ.get("OPENAI_BASE_URL_B", _BASE_URL)
 
 _LLM_ENABLED = bool(_API_KEY)
 
@@ -59,6 +62,7 @@ async def _llm_call(
     model: str = "",
     temperature: float = 0.3,
     timeout: float = 30.0,
+    base_url: str = "",
 ) -> str:
     if not _LLM_ENABLED:
         return ""
@@ -67,8 +71,9 @@ async def _llm_call(
     except ImportError:
         return ""
 
-    model = model or _MODEL
-    headers = {"Authorization": f"Bearer {_API_KEY}", "Content-Type": "application/json"}
+    model    = model or _MODEL
+    endpoint = (base_url or _BASE_URL).rstrip("/")
+    headers  = {"Authorization": f"Bearer {_API_KEY}", "Content-Type": "application/json"}
     messages = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -78,7 +83,7 @@ async def _llm_call(
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                f"{_BASE_URL}/chat/completions",
+                f"{endpoint}/chat/completions",
                 headers=headers,
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=timeout),
@@ -86,7 +91,7 @@ async def _llm_call(
                 data = await resp.json()
                 return data["choices"][0]["message"]["content"]
     except Exception as e:
-        print(f"⚠️  LLM 调用失败 (model={model}): {e}")
+        print(f"⚠️  LLM 调用失败 (model={model}, base_url={endpoint}): {e}")
         return ""
 
 
@@ -290,15 +295,26 @@ class MultiModelAnnotator:
       - 否则取主模型结果
       - 主模型也失败 → 规则生成
 
-    【真正的多模型投票】：
-      在 .env 中设置 OPENAI_MODEL_B 为不同厂商/架构的模型，例如：
-        OPENAI_MODEL=gpt-4o-mini          (OpenAI)
-        OPENAI_MODEL_B=deepseek-chat      (DeepSeek, 同时配 OPENAI_BASE_URL_B)
-      不同来源模型的分歧比同模型不同 temperature 更能提升标注可信度。
+    【真正的多厂商投票配置】（推荐）：
+      在 .env 中设置副模型及其专属 base_url，例如：
+
+        OPENAI_MODEL=gpt-4o-mini              # 主模型：OpenAI
+        OPENAI_BASE_URL=https://api.openai.com/v1
+
+        OPENAI_MODEL_B=deepseek-chat          # 副模型：DeepSeek（不同架构）
+        OPENAI_BASE_URL_B=https://api.deepseek.com/v1
+
+      或：
+        OPENAI_MODEL_B=moonshot-v1-8k         # 副模型：Moonshot
+        OPENAI_BASE_URL_B=https://api.moonshot.cn/v1
+
+      不同厂商/架构模型的分歧比同模型不同 temperature 更能提升标注可信度。
+      _llm_call 对副模型会使用 _BASE_URL_B（已自动从 config 读取）。
 
     当前状态：
-      若 OPENAI_MODEL_B 未设置，_MODEL_B == _MODEL（仅 temperature 不同），
-      这是伪多模型投票，可信度提升有限。配置不同的真实副模型可显著改善。
+      若 OPENAI_MODEL_B 未设置 → _MODEL_B == _MODEL（仅 temperature 不同），
+      若 OPENAI_BASE_URL_B 未设置 → 副模型复用主模型地址，仍为伪多模型。
+      两者都配置才能实现真正的跨厂商投票。
     """
 
     def __init__(self, mode: AnnotationMode = AnnotationMode.AUTO_REVIEW):
@@ -309,10 +325,10 @@ class MultiModelAnnotator:
         prompt  = f"原始素材:\n{content}"
 
         if _LLM_ENABLED:
-            # 并发调用两个模型
+            # 并发调用两个模型（MODEL_B 使用独立 base_url，支持跨厂商）
             raw_a, raw_b = await asyncio.gather(
                 _llm_call(prompt, system=_SFT_SYSTEM, model=_MODEL,   temperature=0.3),
-                _llm_call(prompt, system=_SFT_SYSTEM, model=_MODEL_B, temperature=0.5),
+                _llm_call(prompt, system=_SFT_SYSTEM, model=_MODEL_B, temperature=0.5, base_url=_BASE_URL_B),
                 return_exceptions=True,
             )
             data_a = _parse_json(raw_a if isinstance(raw_a, str) else "")
@@ -359,7 +375,7 @@ class MultiModelAnnotator:
         if _LLM_ENABLED:
             raw_a, raw_b = await asyncio.gather(
                 _llm_call(prompt, system=_DPO_SYSTEM, model=_MODEL,   temperature=0.3),
-                _llm_call(prompt, system=_DPO_SYSTEM, model=_MODEL_B, temperature=0.5),
+                _llm_call(prompt, system=_DPO_SYSTEM, model=_MODEL_B, temperature=0.5, base_url=_BASE_URL_B),
                 return_exceptions=True,
             )
             data_a = _parse_json(raw_a if isinstance(raw_a, str) else "")

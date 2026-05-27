@@ -4,10 +4,10 @@
  * 支持：注册 · 登录 · 展示当前登录状态 · 退出
  * 由 App.jsx 顶栏触发，完成后派发 CustomEvent 供上层刷新状态
  */
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   X, User, Lock, Mail, Tag, Eye, EyeOff,
-  LogIn, UserPlus, LogOut, CheckCircle2, AlertCircle, Loader2,
+  LogIn, UserPlus, LogOut, CheckCircle2, AlertCircle, Loader2, ShieldCheck,
 } from 'lucide-react';
 import { authClient, tokenStore } from './api';
 
@@ -32,6 +32,59 @@ function Field({ icon: Icon, type = 'text', placeholder, value, onChange, right 
       {right && <div className="absolute right-3 top-1/2 -translate-y-1/2">{right}</div>}
     </div>
   );
+}
+
+// ── 密码强度计算（与后端 auth.py 规则对齐：≥8位 + 复杂度≥2）────────
+function calcPasswordStrength(pwd) {
+  if (!pwd) return { score: 0, label: '', color: '' };
+  let score = 0;
+  if (pwd.length >= 8)  score++;
+  if (pwd.length >= 12) score++;
+  if (/[A-Z]/.test(pwd)) score++;
+  if (/[0-9]/.test(pwd)) score++;
+  if (/[^A-Za-z0-9]/.test(pwd)) score++;
+
+  const levels = [
+    { label: '',     color: '' },
+    { label: '弱',   color: 'bg-red-500',    text: 'text-red-400' },
+    { label: '一般', color: 'bg-orange-400',  text: 'text-orange-400' },
+    { label: '中等', color: 'bg-yellow-400',  text: 'text-yellow-400' },
+    { label: '强',   color: 'bg-emerald-500', text: 'text-emerald-400' },
+    { label: '极强', color: 'bg-cyan-400',    text: 'text-cyan-400' },
+  ];
+  return { score, ...levels[Math.min(score, 5)] };
+}
+
+// ── 密码强度进度条 ────────────────────────────────────────────────────
+function PasswordStrengthMeter({ password }) {
+  const { score, label, color, text } = useMemo(() => calcPasswordStrength(password), [password]);
+  if (!password) return null;
+  return (
+    <div className="space-y-1.5 px-0.5">
+      <div className="flex gap-1">
+        {[1, 2, 3, 4, 5].map(i => (
+          <div
+            key={i}
+            className={`flex-1 h-1 rounded-full transition-all duration-300 ${
+              i <= score ? color : 'bg-slate-800'
+            }`}
+          />
+        ))}
+      </div>
+      <div className="flex items-center justify-between text-[10px]">
+        <div className="flex gap-2 text-slate-600">
+          <span className={pwd_check(password.length >= 8)}>≥8位</span>
+          <span className={pwd_check(/[A-Z]/.test(password))}>大写</span>
+          <span className={pwd_check(/[0-9]/.test(password))}>数字</span>
+          <span className={pwd_check(/[^A-Za-z0-9]/.test(password))}>符号</span>
+        </div>
+        {label && <span className={`font-semibold ${text}`}>{label}</span>}
+      </div>
+    </div>
+  );
+}
+function pwd_check(ok) {
+  return ok ? 'text-emerald-500' : 'text-slate-700';
 }
 
 // ════════════════════════════════════════════════════════════════════
@@ -81,7 +134,7 @@ export default function AuthPanel({ isOpen, onClose, onAuthChange }) {
         onAuthChange?.('login', data);
         setTimeout(onClose, 1200);
       } else {
-        if (password.length < 6) { setError('密码至少 6 位'); setLoading(false); return; }
+        if (password.length < 8) { setError('密码至少 8 位，且需包含大写字母、数字或符号中的至少两种'); setLoading(false); return; }
         const data = await authClient.register({
           username: username.trim(),
           password,
@@ -208,6 +261,9 @@ export default function AuthPanel({ isOpen, onClose, onAuthChange }) {
                     </button>
                   }
                 />
+                {mode === 'register' && (
+                  <PasswordStrengthMeter password={password} />
+                )}
               </div>
 
               {/* 错误/成功提示 */}

@@ -29,7 +29,10 @@ class Settings:
     )
     openai_model:     str = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
     # 多模型投票副模型（留空则与主模型相同，走不同 temperature）
-    openai_model_b:   str = os.environ.get("OPENAI_MODEL_B", "")
+    openai_model_b:    str = os.environ.get("OPENAI_MODEL_B", "")
+    # 副模型的 API Base URL（副模型来自不同厂商时设置，如 DeepSeek / Moonshot）
+    # 留空则复用 openai_base_url（主模型地址）
+    openai_base_url_b: str = os.environ.get("OPENAI_BASE_URL_B", "")
 
     # ── JWT 认证 ──────────────────────────────────────────────────────
     jwt_secret_key:  str = os.environ.get(

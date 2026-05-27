@@ -51,6 +51,7 @@ def init_db() -> None:
                 sample_id      TEXT PRIMARY KEY,
                 material_id    TEXT NOT NULL,
                 creator_id     TEXT NOT NULL,
+                package_id     TEXT DEFAULT '',
                 instruction    TEXT NOT NULL,
                 input          TEXT DEFAULT '',
                 output         TEXT NOT NULL,
@@ -67,6 +68,7 @@ def init_db() -> None:
                 sample_id      TEXT PRIMARY KEY,
                 material_id    TEXT NOT NULL,
                 creator_id     TEXT NOT NULL,
+                package_id     TEXT DEFAULT '',
                 prompt         TEXT NOT NULL,
                 chosen         TEXT NOT NULL,
                 rejected       TEXT NOT NULL,
@@ -125,6 +127,25 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_dpo_creator   ON dpo_samples(creator_id);
         """)
         conn.commit()
+
+        # ── 在线迁移：为已存在的旧库补加 package_id 列 ────────────────
+        # ALTER TABLE ADD COLUMN 若列已存在会报错，捕获后忽略
+        for tbl in ("sft_samples", "dpo_samples"):
+            try:
+                conn.execute(f"ALTER TABLE {tbl} ADD COLUMN package_id TEXT DEFAULT ''")
+                conn.commit()
+                print(f"  [migrate] {tbl}.package_id 列已添加")
+            except Exception:
+                pass  # 列已存在，忽略
+
+        # 补充 package_id 索引（若已存在则忽略）
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_sft_package ON sft_samples(package_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_dpo_package ON dpo_samples(package_id)")
+            conn.commit()
+        except Exception:
+            pass
+
         conn.close()
     print(f"✅ [store/db] SQLite 初始化完成 (样本+包元数据): {DB_PATH}")
 
@@ -150,6 +171,7 @@ async def bulk_insert_sft(samples) -> int:
                 for s in samples:
                     rows.append((
                         s.sample_id, s.material_id, s.creator_id,
+                        getattr(s, "package_id", ""),
                         s.instruction, s.input, s.output,
                         s.quality_score, str(s.quality_tier.value if hasattr(s.quality_tier, 'value') else s.quality_tier),
                         s.domain, s.language, s.token_count,
@@ -157,9 +179,9 @@ async def bulk_insert_sft(samples) -> int:
                     ))
                 conn.executemany("""
                     INSERT OR IGNORE INTO sft_samples
-                    (sample_id,material_id,creator_id,instruction,input,output,
+                    (sample_id,material_id,creator_id,package_id,instruction,input,output,
                      quality_score,quality_tier,domain,language,token_count,annotation_meta)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """, rows)
                 conn.commit()
                 return len(rows)
@@ -182,15 +204,16 @@ async def bulk_insert_dpo(samples) -> int:
             try:
                 rows = [(
                     s.sample_id, s.material_id, s.creator_id,
+                    getattr(s, "package_id", ""),
                     s.prompt, s.chosen, s.rejected,
                     s.quality_score, str(s.quality_tier.value if hasattr(s.quality_tier, 'value') else s.quality_tier),
                     s.domain, s.language, s.token_count,
                 ) for s in samples]
                 conn.executemany("""
                     INSERT OR IGNORE INTO dpo_samples
-                    (sample_id,material_id,creator_id,prompt,chosen,rejected,
+                    (sample_id,material_id,creator_id,package_id,prompt,chosen,rejected,
                      quality_score,quality_tier,domain,language,token_count)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 """, rows)
                 conn.commit()
                 return len(rows)
@@ -465,5 +488,54 @@ def increment_download(buyer_id: str, package_id: str) -> None:
                 (buyer_id, package_id),
             )
             conn.commit()
+        finally:
+            conn.close()
+
+
+def get_package(package_id: str) -> dict | None:
+    """按 package_id 查询单个数据集包详情，不存在返回 None。"""
+    with _lock:
+        conn = _get_conn()
+        try:
+            row = conn.execute(
+                "SELECT * FROM dataset_packages WHERE package_id = ?", (package_id,)
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+
+def list_samples_by_package(package_id: str, limit: int = 3) -> list:
+    """
+    返回属于某个数据集包的样本预览（SFT + DPO 混合，最多 limit 条）。
+    注意：dataset_packages 表没有直接关联 sample，通过 package_id 字段关联。
+    如果 sft_samples / dpo_samples 没有 package_id 列，则降级返回空列表。
+    """
+    with _lock:
+        conn = _get_conn()
+        try:
+            samples = []
+            # SFT 样本
+            try:
+                rows = conn.execute(
+                    "SELECT instruction, input, output, quality_score, 'sft' AS sample_type "
+                    "FROM sft_samples WHERE package_id = ? LIMIT ?",
+                    (package_id, limit),
+                ).fetchall()
+                samples.extend([dict(r) for r in rows])
+            except Exception:
+                pass
+            # DPO 样本（补足到 limit）
+            if len(samples) < limit:
+                try:
+                    rows = conn.execute(
+                        "SELECT prompt AS instruction, chosen, rejected, quality_score, 'dpo' AS sample_type "
+                        "FROM dpo_samples WHERE package_id = ? LIMIT ?",
+                        (package_id, limit - len(samples)),
+                    ).fetchall()
+                    samples.extend([dict(r) for r in rows])
+                except Exception:
+                    pass
+            return samples[:limit]
         finally:
             conn.close()

@@ -10,6 +10,9 @@ uvicorn[standard]==0.32.1
 pydantic==2.10.3
 python-multipart==0.0.18     # 支持文件上传（图像/音频）
 
+# ── 异步 HTTP 客户端 ─────────────────────────────────────
+aiohttp==3.10.11             # AutoAnnotator / QualityScorer 异步调用 LLM API（必须）
+
 # ── 向量数据库 ──────────────────────────────────────────────
 chromadb==0.5.23
 

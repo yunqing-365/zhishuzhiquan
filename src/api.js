@@ -23,6 +23,8 @@ const DEFAULT_TIMEOUT_MS = 8000;
 // ── Token 管理（存入 sessionStorage，关闭标签页自动清除）──────────
 const TOKEN_KEY    = 'zszq_token';
 const CREATOR_KEY  = 'zszq_creator';
+// 买家会话 ID（不依赖登录，tab 级持久化，保证购买→下载 buyer_id 一致）
+const BUYER_KEY    = 'zszq_buyer_id';
 
 export const tokenStore = {
   get:   ()        => sessionStorage.getItem(TOKEN_KEY),
@@ -39,6 +41,19 @@ export const tokenStore = {
     catch { return null; }
   },
 };
+
+// 买家 ID：优先取登录用户 creator_id，否则生成并持久化到 sessionStorage
+// 确保同一 tab 内购买和下载使用完全相同的 buyer_id
+export function getBuyerId() {
+  const creator = tokenStore.getCreator();
+  if (creator?.creator_id) return creator.creator_id;
+  let bid = sessionStorage.getItem(BUYER_KEY);
+  if (!bid) {
+    bid = 'buyer_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    sessionStorage.setItem(BUYER_KEY, bid);
+  }
+  return bid;
+}
 
 // ── 结构化错误类型 ─────────────────────────────────────────────────
 export class ApiError extends Error {
@@ -599,5 +614,68 @@ export const datasetClient = {
   /** 数据集包列表（SQLite 持久化，重启不丢） */
   async listPackagesSqlite(limit = 20) {
     return apiFetch(`/api/dataset/packages?limit=${limit}`, { method: 'GET' });
+  },
+};
+
+// ════════════════════════════════════════════════════════════════════
+// P3 新增：企业买家市场客户端（无需 JWT，公开接口）
+// ════════════════════════════════════════════════════════════════════
+export const marketClient = {
+  /**
+   * 浏览市场数据集列表（公开，无需登录）
+   * @param {Object} params - 筛选参数
+   */
+  async listPackages({
+    q = '', domain = '', dataset_type = '', min_quality = null,
+    max_price = null, sort_by = 'quality', order = 'desc',
+    limit = 50, offset = 0,
+  } = {}) {
+    const params = new URLSearchParams();
+    if (q)            params.set('q', q);
+    if (domain)       params.set('domain', domain);
+    if (dataset_type) params.set('dataset_type', dataset_type);
+    if (min_quality != null) params.set('min_quality', min_quality);
+    if (max_price   != null) params.set('max_price', max_price);
+    params.set('sort_by', sort_by);
+    params.set('order',   order);
+    params.set('limit',   limit);
+    params.set('offset',  offset);
+    const url = `${BASE_URL}/api/market/packages?${params}`;
+    const res = await fetch(url, { headers: { 'Content-Type': 'application/json' } });
+    if (!res.ok) throw new Error(`市场列表加载失败 (${res.status})`);
+    return res.json();
+  },
+
+  /** 数据集详情 + 样本预览 */
+  async getPackage(packageId) {
+    const res = await fetch(`${BASE_URL}/api/market/package/${packageId}`);
+    if (!res.ok) throw new Error(`数据集详情加载失败 (${res.status})`);
+    return res.json();
+  },
+
+  /** 平台整体统计（买家首页展示） */
+  async getStats() {
+    const res = await fetch(`${BASE_URL}/api/market/stats`);
+    if (!res.ok) throw new Error(`市场统计加载失败 (${res.status})`);
+    return res.json();
+  },
+
+  /** 购买数据集（需要登录 token） */
+  async purchase(packageId, priceCny, buyerId = null) {
+    const bid = buyerId || getBuyerId();   // 使用稳定的 buyer_id
+    return apiFetch(`/api/dataset/sell`, {
+      method: 'POST',
+      body: JSON.stringify({
+        package_id: packageId,
+        price_cny:  priceCny,
+        buyer_id:   bid,
+      }),
+    });
+  },
+
+  /** 下载已购数据集 */
+  async download(packageId, fileType = 'zip') {
+    const bid = getBuyerId();   // 与购买时完全一致的 buyer_id
+    return datasetClient.downloadDataset(packageId, bid, fileType);
   },
 };

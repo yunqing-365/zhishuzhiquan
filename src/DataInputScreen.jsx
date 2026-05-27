@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   UploadCloud, Cpu, Database, PlayCircle, ShieldCheck, Lock,
   Image as ImageIcon, FileText, Tag, ChevronDown, ChevronUp,
-  FlaskConical, Mic, StopCircle, Waveform, Film, History,
+  FlaskConical, Mic, StopCircle, Waveform, Film, History, ShoppingBag,
 } from 'lucide-react';
 import { apiClient } from './api';
 
@@ -176,7 +176,7 @@ const WaveformCanvas = ({ analyserRef, isRecording }) => {
 };
 
 // ─── 主组件 ─────────────────────────────────────────────────────────
-const DataInputScreen = ({ onComplete, onMaterialUploaded, onHistory }) => {
+const DataInputScreen = ({ onComplete, onMaterialUploaded, onHistory, onMarketplace }) => {
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress]         = useState(0);
   const [statusText, setStatusText]     = useState('');
@@ -488,6 +488,16 @@ const DataInputScreen = ({ onComplete, onMaterialUploaded, onHistory }) => {
               >
                 <History className="w-3.5 h-3.5" />
                 <span className="text-xs font-mono">历史</span>
+              </button>
+            )}
+            {onMarketplace && (
+              <button
+                onClick={onMarketplace}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-cyan-800/60 text-cyan-500 hover:text-cyan-300 hover:border-cyan-500/60 hover:bg-cyan-900/10 transition-all mr-2"
+                title="企业买家数据集市场"
+              >
+                <ShoppingBag className="w-3.5 h-3.5" />
+                <span className="text-xs font-mono">数据集市场</span>
               </button>
             )}
             <Tag className="w-3.5 h-3.5 text-emerald-400" />

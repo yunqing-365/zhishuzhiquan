@@ -45,6 +45,34 @@ const fmtTime  = (s) => {
 // 子组件
 // ════════════════════════════════════════════════════════════════════
 
+// ── 卡片骨架屏（加载占位）────────────────────────────────────────────
+function CardSkeleton() {
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 flex flex-col gap-3 animate-pulse">
+      {/* 头部：图标 + 标题 */}
+      <div className="flex items-start gap-2">
+        <div className="w-7 h-7 rounded-lg bg-slate-800 shrink-0" />
+        <div className="flex-1 space-y-1.5">
+          <div className="h-3.5 bg-slate-800 rounded w-3/4" />
+          <div className="h-3 bg-slate-800/60 rounded w-1/2" />
+        </div>
+      </div>
+      {/* 质量分条 */}
+      <div className="h-9 rounded-lg bg-slate-800/50" />
+      {/* 统计行 */}
+      <div className="grid grid-cols-2 gap-2">
+        <div className="h-3.5 bg-slate-800/50 rounded" />
+        <div className="h-3.5 bg-slate-800/50 rounded" />
+      </div>
+      {/* 价格+按钮 */}
+      <div className="flex items-center justify-between pt-2 border-t border-slate-800/50">
+        <div className="h-5 w-14 bg-slate-800 rounded" />
+        <div className="h-7 w-16 bg-slate-800 rounded-lg" />
+      </div>
+    </div>
+  );
+}
+
 function StatPill({ icon: Icon, label, value, color = 'text-slate-300' }) {
   return (
     <div className="flex items-center gap-1.5 text-xs">
@@ -414,9 +442,8 @@ export default function DatasetCatalog({ isOpen, onClose }) {
       {/* 主体内容 */}
       <div className="flex-1 overflow-y-auto p-5">
         {loading && !packages.length ? (
-          <div className="flex items-center justify-center h-48 text-slate-500 gap-2">
-            <Loader2 size={20} className="animate-spin" />
-            <span>加载中…</span>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+            {[...Array(8)].map((_, i) => <CardSkeleton key={i} />)}
           </div>
         ) : error ? (
           <div className="flex flex-col items-center justify-center h-48 gap-3 text-slate-500">

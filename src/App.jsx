@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RainbowKitProvider, darkTheme }    from '@rainbow-me/rainbowkit';
 import '@rainbow-me/rainbowkit/styles.css';
 
-import { History, BarChart2, Store, User, LogOut, LogIn } from 'lucide-react';
+import { History, BarChart2, Store, User, LogOut, LogIn, ShoppingBag } from 'lucide-react';
 import DataInputScreen            from './DataInputScreen';
 import DatasetProductionScreen    from './DatasetProductionScreen';
 import OracleValuationScreen      from './OracleValuationScreen';
@@ -15,6 +15,7 @@ import WalletButton               from './web3/WalletButton';
 import { wagmiConfig, targetChain } from './web3/config';
 import { useApiHealth, authClient, tokenStore } from './api';
 import DatasetCatalog             from './DatasetCatalog';
+import DatasetMarketplace         from './DatasetMarketplace';
 import CreatorDashboard           from './CreatorDashboard';
 import AuthPanel                  from './AuthPanel';
 
@@ -48,7 +49,7 @@ const BackendStatus = () => {
   );
 };
 
-const ProgressBar = ({ step, category, onBack, canGoBack, onHistory, onAnalytics, onCatalog, onCreator, onAuth, loggedCreator }) => {
+const ProgressBar = ({ step, category, onBack, canGoBack, onHistory, onAnalytics, onCatalog, onMarketplace, onCreator, onAuth, loggedCreator }) => {
   const modeColor = {
     audio: 'bg-emerald-500',
     image: 'bg-amber-500',
@@ -118,13 +119,22 @@ const ProgressBar = ({ step, category, onBack, canGoBack, onHistory, onAnalytics
         <span className="hidden sm:inline">看板</span>
       </button>
 
-      {/* ★ 数据集市场 */}
+      {/* ★ 买家市场 */}
       <button
-        onClick={onCatalog}
+        onClick={onMarketplace}
         className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-700 text-slate-400 hover:text-slate-200 hover:border-cyan-500/50 text-xs font-mono transition-all"
       >
-        <Store className="w-3.5 h-3.5" />
+        <ShoppingBag className="w-3.5 h-3.5" />
         <span className="hidden sm:inline">市场</span>
+      </button>
+
+      {/* ★ 创作者我的包 */}
+      <button
+        onClick={onCatalog}
+        className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-700 text-slate-400 hover:text-slate-200 hover:border-violet-500/50 text-xs font-mono transition-all"
+      >
+        <Store className="w-3.5 h-3.5" />
+        <span className="hidden sm:inline">我的包</span>
       </button>
 
       {/* ★ 创作者控制台 */}
@@ -187,6 +197,7 @@ function AppInner() {
   const [showHistory, setShowHistory]       = useState(false);
   const [showAnalytics, setShowAnalytics]   = useState(false);
   const [showCatalog, setShowCatalog]       = useState(false);
+  const [showMarketplace, setShowMarketplace] = useState(false);
   const [showCreator, setShowCreator]       = useState(false);
   const [showAuth, setShowAuth]             = useState(false);
   const [loggedCreator, setLoggedCreator]   = useState(() => tokenStore.getCreator());
@@ -278,6 +289,7 @@ function AppInner() {
           onHistory={() => setShowHistory(true)}
           onAnalytics={() => setShowAnalytics(true)}
           onCatalog={() => setShowCatalog(true)}
+          onMarketplace={() => setShowMarketplace(true)}
           onCreator={() => setShowCreator(true)}
           onAuth={() => setShowAuth(true)}
           loggedCreator={loggedCreator}
@@ -290,6 +302,7 @@ function AppInner() {
             onComplete={handleInputComplete}
             onMaterialUploaded={handleMaterialUploaded}
             onHistory={() => setShowHistory(true)}
+            onMarketplace={() => setShowMarketplace(true)}
           />
         )}
         {currentStep === 2 && (
@@ -327,6 +340,7 @@ function AppInner() {
       <HistoryPanel isOpen={showHistory} onClose={() => setShowHistory(false)} />
       <AnalyticsDashboard isOpen={showAnalytics} onClose={() => setShowAnalytics(false)} />
       <DatasetCatalog isOpen={showCatalog} onClose={() => setShowCatalog(false)} />
+      <DatasetMarketplace isOpen={showMarketplace} onClose={() => setShowMarketplace(false)} />
       <CreatorDashboard isOpen={showCreator} onClose={() => setShowCreator(false)} />
       <AuthPanel
         isOpen={showAuth}
