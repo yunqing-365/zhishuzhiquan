@@ -4,7 +4,7 @@ services:
   backend:
     build:
       context: ./ai-echo-backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.backend
     container_name: ai-echo-backend
     restart: unless-stopped
     environment:
@@ -25,6 +25,16 @@ services:
       JWT_EXPIRE_DAYS: "${JWT_EXPIRE_DAYS:-30}"
       # 可选：B2B API Key 鉴权（留空则关闭）
       API_KEY: "${API_KEY:-}"
+      # 业务参数（留空使用代码默认值）
+      PLATFORM_REVENUE_RATIO: "${PLATFORM_REVENUE_RATIO:-0.30}"
+      CREATOR_REVENUE_RATIO:  "${CREATOR_REVENUE_RATIO:-0.70}"
+      ENABLE_LLM_SAFETY:      "${ENABLE_LLM_SAFETY:-false}"
+      # 存储路径（留空使用容器内默认路径 /app/data/）
+      SQLITE_DB_PATH:              "${SQLITE_DB_PATH:-}"
+      CREATOR_LEDGER_DB_PATH:      "${CREATOR_LEDGER_DB_PATH:-}"
+      DATASET_OUTPUT_DIR:          "${DATASET_OUTPUT_DIR:-}"
+      PIPELINE_STATE_DIR:          "${PIPELINE_STATE_DIR:-}"
+      CHROMA_DB_DIR:               "${CHROMA_DB_DIR:-}"
     volumes:
       # 持久化 ChromaDB 向量库 + SQLite 历史记录
       - ai_echo_data:/app/data
@@ -45,7 +55,7 @@ services:
   frontend:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.frontend
       args:
         # API 请求通过 Nginx 反向代理，走同源 /api/ 路径
         VITE_API_BASE_URL: "/api"

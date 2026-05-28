@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RainbowKitProvider, darkTheme }    from '@rainbow-me/rainbowkit';
 import '@rainbow-me/rainbowkit/styles.css';
 
-import { History, BarChart2, Store, User, LogOut, LogIn, ShoppingBag } from 'lucide-react';
+import { History, BarChart2, Store, User, LogOut, LogIn, ShoppingBag, Shield, ClipboardList } from 'lucide-react';
 import DataInputScreen            from './DataInputScreen';
 import DatasetProductionScreen    from './DatasetProductionScreen';
 import OracleValuationScreen      from './OracleValuationScreen';
@@ -18,6 +18,8 @@ import DatasetCatalog             from './DatasetCatalog';
 import DatasetMarketplace         from './DatasetMarketplace';
 import CreatorDashboard           from './CreatorDashboard';
 import AuthPanel                  from './AuthPanel';
+import HumanReviewPanel           from './HumanReviewPanel';
+import AdminPanel                 from './AdminPanel';
 
 // ── React Query Client（wagmi v2 依赖）────────────────────────────
 const queryClient = new QueryClient({
@@ -49,7 +51,7 @@ const BackendStatus = () => {
   );
 };
 
-const ProgressBar = ({ step, category, onBack, canGoBack, onHistory, onAnalytics, onCatalog, onMarketplace, onCreator, onAuth, loggedCreator }) => {
+const ProgressBar = ({ step, category, onBack, canGoBack, onHistory, onAnalytics, onCatalog, onMarketplace, onCreator, onAuth, onReview, onAdmin, loggedCreator }) => {
   const modeColor = {
     audio: 'bg-emerald-500',
     image: 'bg-amber-500',
@@ -146,6 +148,26 @@ const ProgressBar = ({ step, category, onBack, canGoBack, onHistory, onAnalytics
         <span className="hidden sm:inline">我的</span>
       </button>
 
+      {/* ★ 人工复核 */}
+      <button
+        onClick={onReview}
+        className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-700 text-slate-400 hover:text-slate-200 hover:border-amber-500/50 text-xs font-mono transition-all"
+        title="人工复核队列"
+      >
+        <ClipboardList className="w-3.5 h-3.5" />
+        <span className="hidden lg:inline">复核</span>
+      </button>
+
+      {/* ★ 合约管理 */}
+      <button
+        onClick={onAdmin}
+        className="shrink-0 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-slate-700 text-slate-400 hover:text-slate-200 hover:border-purple-500/50 text-xs font-mono transition-all"
+        title="合约管理员控制台"
+      >
+        <Shield className="w-3.5 h-3.5" />
+        <span className="hidden lg:inline">管理</span>
+      </button>
+
       {/* 模态标记 */}
       <div className={`shrink-0 text-[10px] font-mono px-2 py-1 rounded border ${
         category === 'audio' ? 'text-emerald-400 border-emerald-500/30 bg-emerald-900/20' :
@@ -200,6 +222,8 @@ function AppInner() {
   const [showMarketplace, setShowMarketplace] = useState(false);
   const [showCreator, setShowCreator]       = useState(false);
   const [showAuth, setShowAuth]             = useState(false);
+  const [showReview, setShowReview]         = useState(false);
+  const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [loggedCreator, setLoggedCreator]   = useState(() => tokenStore.getCreator());
   const [stepHistory, setStepHistory]       = useState([]);
   // 数据集生产新增状态
@@ -292,6 +316,8 @@ function AppInner() {
           onMarketplace={() => setShowMarketplace(true)}
           onCreator={() => setShowCreator(true)}
           onAuth={() => setShowAuth(true)}
+          onReview={() => setShowReview(true)}
+          onAdmin={() => setShowAdminPanel(true)}
           loggedCreator={loggedCreator}
         />
       )}
@@ -342,6 +368,8 @@ function AppInner() {
       <DatasetCatalog isOpen={showCatalog} onClose={() => setShowCatalog(false)} />
       <DatasetMarketplace isOpen={showMarketplace} onClose={() => setShowMarketplace(false)} />
       <CreatorDashboard isOpen={showCreator} onClose={() => setShowCreator(false)} />
+      {showReview && <div className='fixed inset-0 z-50 overflow-y-auto bg-slate-950'><div className='min-h-full'><button onClick={() => setShowReview(false)} className='fixed top-4 right-4 z-50 px-3 py-1.5 rounded-lg border border-slate-700 text-slate-400 hover:text-slate-200 text-xs bg-slate-900 flex items-center gap-1.5'><span>✕</span> 关闭</button><HumanReviewPanel reviewer={loggedCreator?.creator_id || 'admin'} /></div></div>}
+      {showAdminPanel && <div className='fixed inset-0 z-50 overflow-y-auto bg-slate-950'><div className='min-h-full'><button onClick={() => setShowAdminPanel(false)} className='fixed top-4 right-4 z-50 px-3 py-1.5 rounded-lg border border-slate-700 text-slate-400 hover:text-slate-200 text-xs bg-slate-900 flex items-center gap-1.5'><span>✕</span> 关闭</button><AdminPanel /></div></div>}
       <AuthPanel
         isOpen={showAuth}
         onClose={() => setShowAuth(false)}

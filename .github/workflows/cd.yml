@@ -1,0 +1,190 @@
+name: CD
+
+on:
+  push:
+    tags:
+      - "v*.*.*"        # 正式发布：v1.2.3
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "部署目标环境"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: ${{ github.repository_owner }}
+
+jobs:
+  # ─── 构建并推送多平台 Docker 镜像 ────────────────────────────────
+  build-and-push:
+    name: Build & Push Docker Images
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      backend_image: ${{ steps.meta-backend.outputs.tags }}
+      frontend_image: ${{ steps.meta-frontend.outputs.tags }}
+      version: ${{ steps.version.outputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version tag
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=staging-$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up QEMU (多平台交叉编译)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── Backend 镜像 ──
+      - name: Generate backend image metadata
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/zhishuzhiquan-backend
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=staging,enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging' }}
+
+      - name: Build and push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: ai-echo-backend
+          file: ai-echo-backend/Dockerfile.backend
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Frontend 镜像 ──
+      - name: Generate frontend image metadata
+        id: meta-frontend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/zhishuzhiquan-frontend
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=staging,enable=${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment == 'staging' }}
+
+      - name: Build and push frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.frontend
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta-frontend.outputs.tags }}
+          labels: ${{ steps.meta-frontend.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ─── Staging 部署（手动触发或 tag 触发）─────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    environment: staging
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.ref_type == 'tag' && contains(github.ref, '-rc'))
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to staging server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            cd /opt/zhishuzhiquan
+            # 拉取最新 docker-compose.yml
+            git pull origin main
+            # 更新镜像版本
+            export BACKEND_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/zhishuzhiquan-backend:${{ needs.build-and-push.outputs.version }}"
+            export FRONTEND_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/zhishuzhiquan-frontend:${{ needs.build-and-push.outputs.version }}"
+            # 滚动重启（zero-downtime）
+            docker compose pull
+            docker compose up -d --no-deps --force-recreate backend frontend
+            docker compose exec -T backend python -c "from store.db import init_db; init_db()"
+            echo "✅ Staging 部署完成: ${{ needs.build-and-push.outputs.version }}"
+
+  # ─── 生产部署（正式 tag，非 rc）────────────────────────────────
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build-and-push, deploy-staging]
+    environment: production
+    if: |
+      github.ref_type == 'tag' &&
+      !contains(github.ref, '-rc') &&
+      !contains(github.ref, '-beta')
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deploy to production server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            cd /opt/zhishuzhiquan
+            git pull origin main
+            export BACKEND_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/zhishuzhiquan-backend:${{ needs.build-and-push.outputs.version }}"
+            export FRONTEND_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/zhishuzhiquan-frontend:${{ needs.build-and-push.outputs.version }}"
+            # 生产：蓝绿部署（先起新容器，健康检查通过后停旧容器）
+            docker compose pull
+            docker compose up -d --no-deps --scale backend=2 backend
+            sleep 15
+            docker compose exec -T backend python -c "import requests; r=requests.get('http://localhost:8000/health'); r.raise_for_status()"
+            docker compose up -d --no-deps --force-recreate backend frontend
+            echo "✅ 生产部署完成: ${{ needs.build-and-push.outputs.version }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ## 🚀 知数知圈 ${{ needs.build-and-push.outputs.version }}
+
+            ### Docker Images
+            - Backend: `${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/zhishuzhiquan-backend:${{ needs.build-and-push.outputs.version }}`
+            - Frontend: `${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/zhishuzhiquan-frontend:${{ needs.build-and-push.outputs.version }}`
+
+            ### 快速部署
+            ```bash
+            docker compose pull && docker compose up -d
+            ```

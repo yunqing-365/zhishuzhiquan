@@ -66,7 +66,7 @@ export class ApiError extends Error {
 }
 
 // ── 核心 fetch 包装（统一超时 + 错误分类 + 自动注入 Token）─────────
-async function apiFetch(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
+export async function apiFetch(path, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -677,5 +677,31 @@ export const marketClient = {
   async download(packageId, fileType = 'zip') {
     const bid = getBuyerId();   // 与购买时完全一致的 buyer_id
     return datasetClient.downloadDataset(packageId, bid, fileType);
+  },
+};
+
+// ════════════════════════════════════════════════════════════════════
+// reviewClient — 人工复核队列（第 15 轮新增）
+// ════════════════════════════════════════════════════════════════════
+export const reviewClient = {
+  /** 获取待复核 + 已处理样本列表 */
+  async list() {
+    return apiFetch('/api/review/queue');
+  },
+
+  /** 批准样本 */
+  async approve(reviewId, reviewer = 'admin') {
+    return apiFetch(
+      `/api/review/${encodeURIComponent(reviewId)}/approve?reviewer=${encodeURIComponent(reviewer)}`,
+      { method: 'POST' }
+    );
+  },
+
+  /** 拒绝样本 */
+  async reject(reviewId, reviewer = 'admin') {
+    return apiFetch(
+      `/api/review/${encodeURIComponent(reviewId)}/reject?reviewer=${encodeURIComponent(reviewer)}`,
+      { method: 'POST' }
+    );
   },
 };

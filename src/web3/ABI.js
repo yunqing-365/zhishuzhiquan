@@ -209,6 +209,70 @@ export const AI_ECHO_ABI = [
       { name: 'callsUsed', type: 'uint256', indexed: false },
     ],
   },
+  // ── 第 14 轮新增：紧急暂停 & 管理员权限转移 ────────────────────
+  {
+    name: 'ContractPaused',
+    type: 'event',
+    inputs: [
+      { name: 'by', type: 'address', indexed: true  },
+      { name: 'at', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    name: 'ContractUnpaused',
+    type: 'event',
+    inputs: [
+      { name: 'by', type: 'address', indexed: true  },
+      { name: 'at', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    name: 'AdminTransferInitiated',
+    type: 'event',
+    inputs: [
+      { name: 'from',    type: 'address', indexed: true },
+      { name: 'pending', type: 'address', indexed: true },
+    ],
+  },
+  {
+    name: 'AdminTransferAccepted',
+    type: 'event',
+    inputs: [
+      { name: 'newAdmin', type: 'address', indexed: true },
+    ],
+  },
+  // 状态读取
+  { name: 'paused',        type: 'function', stateMutability: 'view', inputs: [], outputs: [{ type: 'bool'    }] },
+  { name: 'pendingAdmin',  type: 'function', stateMutability: 'view', inputs: [], outputs: [{ type: 'address' }] },
+  // 写操作（onlyAdmin）
+  {
+    name: 'pause',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs:  [],
+    outputs: [],
+  },
+  {
+    name: 'unpause',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs:  [],
+    outputs: [],
+  },
+  {
+    name: 'transferAdmin',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs:  [{ name: '_newAdmin', type: 'address' }],
+    outputs: [],
+  },
+  {
+    name: 'acceptAdmin',
+    type: 'function',
+    stateMutability: 'nonpayable',
+    inputs:  [],
+    outputs: [],
+  },
 ] as const;
 
 // HashAlgorithm enum（与合约完全对齐）
